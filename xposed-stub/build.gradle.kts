@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     `java-library`
 }
@@ -7,7 +9,17 @@ java {
     targetCompatibility = JavaVersion.VERSION_17
 }
 
+val localSdkDir = providers.fileContents(rootProject.layout.projectDirectory.file("local.properties"))
+    .asText.map { contents ->
+        Properties().apply { load(contents.reader()) }.getProperty("sdk.dir", "")
+    }.filter { it.isNotBlank() }
+
+val androidSdkDir = localSdkDir
+    .orElse(providers.environmentVariable("ANDROID_HOME"))
+    .orElse(providers.environmentVariable("ANDROID_SDK_ROOT"))
+    .orElse(providers.systemProperty("user.home").map { "$it/Library/Android/sdk" })
+
 dependencies {
     // Only the android.* types referenced by stub signatures; never packaged.
-    compileOnly(files("${System.getProperty("user.home")}/Library/Android/sdk/platforms/android-36/android.jar"))
+    compileOnly(files(androidSdkDir.map { "$it/platforms/android-36/android.jar" }))
 }
