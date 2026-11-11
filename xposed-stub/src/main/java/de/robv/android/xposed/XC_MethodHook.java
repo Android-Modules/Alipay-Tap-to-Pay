@@ -44,6 +44,14 @@ public abstract class XC_MethodHook {
             if (throwable != null) throw throwable;
             return result;
         }
+
+        public Object getObjectExtra(String key) {
+            throw new IllegalStateException("stub");
+        }
+
+        public void setObjectExtra(String key, Object value) {
+            throw new IllegalStateException("stub");
+        }
     }
 
     public class Unhook {

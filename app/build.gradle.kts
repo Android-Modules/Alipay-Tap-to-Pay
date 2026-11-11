@@ -2,6 +2,8 @@ plugins {
     id("com.android.application")
 }
 
+val unsignedRelease = providers.gradleProperty("unsignedRelease").orNull == "true"
+
 android {
     namespace = "com.dalong.alipaynfc"
     compileSdk = 36
@@ -10,14 +12,16 @@ android {
         applicationId = "com.dalong.alipaynfc"
         minSdk = 27
         targetSdk = 34
-        versionCode = 6
-        versionName = "1.0.6"
+        versionCode = 7
+        versionName = "1.0.7"
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("debug")
+            if (!unsignedRelease) {
+                signingConfig = signingConfigs.getByName("debug")
+            }
         }
     }
 

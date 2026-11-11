@@ -3,9 +3,12 @@ package com.dalong.alipaynfc.xp;
 import android.content.Context;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Handler;
 import android.os.SystemClock;
 
 import com.dalong.alipaynfc.C;
+
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import de.robv.android.xposed.XSharedPreferences;
 
@@ -13,8 +16,7 @@ import de.robv.android.xposed.XSharedPreferences;
  * Config reader for hooked processes. Channels (first available wins):
  * 1. XSharedPreferences — requires LSPosed "xposedsharedprefs" support (world-readable prefs).
  * 2. ContentProvider call into the module app.
- * Values are cached for a couple of seconds; {@link #invalidate()} is triggered by a
- * config-changed broadcast for immediate effect.
+ * Only the NFC worker reads either channel. Dispatch consumes the latest snapshot.
  */
 public final class HookConfig {
 
@@ -29,49 +31,40 @@ public final class HookConfig {
         public String source = "default";
     }
 
-    private static final Object LOCK = new Object();
     private static final long RELOAD_INTERVAL_MS = 2000;
+    private static final AtomicBoolean refreshQueued = new AtomicBoolean();
 
-    private static volatile Cache cached;
-    private static long lastReloadElapsed;
+    private static volatile Cache cached = new Cache();
+    private static volatile long nextReloadElapsed;
     private static XSharedPreferences xsp;
 
     private HookConfig() {}
 
-    /** Returns cached config; reloads from the app if stale. Never returns null. */
-    public static Cache get(Context ctx) {
-        Cache c = cached;
-        if (c != null && SystemClock.elapsedRealtime() - lastReloadElapsed < RELOAD_INTERVAL_MS) {
-            return c;
-        }
-        synchronized (LOCK) {
-            if (cached != null && SystemClock.elapsedRealtime() - lastReloadElapsed < RELOAD_INTERVAL_MS) {
-                return cached;
+    static Cache get(Context ctx, Handler worker) {
+        if (worker != null && SystemClock.elapsedRealtime() >= nextReloadElapsed
+                && refreshQueued.compareAndSet(false, true)) {
+            if (!worker.post(() -> {
+                try {
+                    if (SystemClock.elapsedRealtime() >= nextReloadElapsed) refresh(ctx, false);
+                } finally {
+                    refreshQueued.set(false);
+                }
+            })) {
+                refreshQueued.set(false);
             }
-            Cache fresh = load(ctx);
-            lastReloadElapsed = SystemClock.elapsedRealtime();
-            if (fresh.valid) {
-                cached = fresh;
-                return fresh;
-            }
-            return cached != null ? cached : fresh;
         }
+        return cached;
     }
 
-    public static void invalidate() {
-        synchronized (LOCK) {
-            cached = null;
-            lastReloadElapsed = 0;
+    /** Runs on the NFC worker, including after the settings UI broadcasts a change. */
+    static void refresh(Context ctx, boolean configChanged) {
+        // The app's in-memory preferences are current even while apply() is writing the file.
+        Cache fresh = configChanged ? loadProvider(ctx) : loadXsp();
+        if (!fresh.valid || (!configChanged && fresh.revision < cached.revision)) {
+            fresh = configChanged ? loadXsp() : loadProvider(ctx);
         }
-        XLog.i("config cache invalidated");
-    }
-
-    private static Cache load(Context ctx) {
-        Cache a = loadXsp();
-        if (a.valid) return a;
-        Cache b = loadProvider(ctx);
-        if (b.valid) return b;
-        return a; // empty defaults; keep the system untouched (enabled=true, user=0)
+        if (fresh.valid) cached = fresh;
+        nextReloadElapsed = SystemClock.elapsedRealtime() + RELOAD_INTERVAL_MS;
     }
 
     private static Cache loadXsp() {

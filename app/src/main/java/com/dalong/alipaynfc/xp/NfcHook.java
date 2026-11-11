@@ -1,12 +1,19 @@
 package com.dalong.alipaynfc.xp;
 
+import android.app.Activity;
 import android.app.Application;
+import android.content.ActivityNotFoundException;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.net.Uri;
+import android.nfc.NfcAdapter;
+import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.UserHandle;
 import android.text.TextUtils;
 
@@ -15,37 +22,29 @@ import com.dalong.alipaynfc.xp.HookConfig.Cache;
 
 import org.json.JSONObject;
 
+import java.lang.reflect.InvocationTargetException;
+import java.util.Locale;
+
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
-/**
- * Loaded inside com.android.nfc (Nfc_st on Xiaomi).
- *
- * Dispatch flow (verified by decompiling Nfc_st.apk, HyperOS 3 / Android 16):
- *   NfcDispatcher.dispatchTag -> NfcDispatcher$DispatchInfo.tryStartActivity()
- *     -> resolves receivers for the CURRENT user (user 0) -> main Alipay wins
- *     -> context.startActivityAsUser(rootIntent, UserHandle.CURRENT)
- *   rootIntent = NfcRootActivity carrying the real dispatch intent in "launchIntent".
- *   NfcRootActivity.onCreate reads "launchIntentUserHandle" (defaults to CURRENT)
- *   and forwards startActivityAsUser(launchIntent, thatUser).
- *
- * This hook intercepts the outer startActivityAsUser call and rewrites:
- *   - "launchIntentUserHandle" extra + the outer UserHandle argument -> target user
- *     (system app-cloning: same package under a hidden user id, e.g. XSpace 999)
- *   - or "launchIntent" package -> container package (third-party multi-open)
- */
+/** Redirects Alipay tag dispatch inside the system NFC process. */
 public final class NfcHook {
 
+    private static final String ROOT_ACTIVITY = "com.android.nfc.NfcRootActivity";
+    private static final String CHOOSER_ACTIVITY = "com.android.nfc.TechListChooserActivity";
+    private static final String FORWARD_STATE = C.MODULE_PKG + ".forwardState";
+
     private static volatile Context appContext;
+    private static volatile Handler worker;
 
     private NfcHook() {}
 
     public static void init(XC_LoadPackage.LoadPackageParam lpp) {
-        XLog.i("loaded in " + lpp.packageName + " sdk=" + android.os.Build.VERSION.SDK_INT);
-        installDispatchHook(lpp.classLoader);
-        attachApp();
+        XLog.i("loaded in " + lpp.packageName + " sdk=" + Build.VERSION.SDK_INT);
+        if (installDispatchHook(lpp.classLoader)) attachApp();
     }
 
     private static void attachApp() {
@@ -57,9 +56,16 @@ public final class NfcHook {
                         if (param.args.length > 0 && param.args[0] instanceof Context
                                 && appContext == null) {
                             appContext = (Context) param.args[0];
-                            XLog.i("application attached, context ready");
-                            registerConfigListener(appContext);
-                            sendAlive(appContext, "com.android.nfc");
+                            Context ctx = appContext;
+                            HandlerThread thread = new HandlerThread("AlipayNfcDispatch");
+                            thread.start();
+                            Handler handler = new Handler(thread.getLooper());
+                            registerConfigListener(ctx, handler);
+                            handler.post(() -> {
+                                HookConfig.refresh(ctx, false);
+                                sendAlive(ctx, C.NFC_PKG);
+                            });
+                            worker = handler;
                         }
                     } catch (Throwable t) {
                         XLog.e(t);
@@ -72,27 +78,28 @@ public final class NfcHook {
         }
     }
 
-    private static void registerConfigListener(Context ctx) {
+    private static void registerConfigListener(Context ctx, Handler handler) {
         try {
             IntentFilter f = new IntentFilter();
             f.addAction(C.ACTION_CONFIG_CHANGED);
             f.addAction(C.ACTION_REQUEST_CLEAR);
+            f.addAction(Intent.ACTION_USER_UNLOCKED);
             BroadcastReceiver r = new BroadcastReceiver() {
                 @Override
                 public void onReceive(Context context, Intent intent) {
                     String action = intent.getAction();
-                    if (C.ACTION_CONFIG_CHANGED.equals(action)) {
-                        HookConfig.invalidate();
+                    if (C.ACTION_CONFIG_CHANGED.equals(action) || Intent.ACTION_USER_UNLOCKED.equals(action)) {
+                        HookConfig.refresh(ctx, C.ACTION_CONFIG_CHANGED.equals(action));
                     } else if (C.ACTION_REQUEST_CLEAR.equals(action)) {
                         GStore.clearRecords(context);
                         XLog.i("records cleared via nfc process");
                     }
                 }
             };
-            if (android.os.Build.VERSION.SDK_INT >= 33) {
-                ctx.registerReceiver(r, f, android.content.Context.RECEIVER_EXPORTED);
+            if (Build.VERSION.SDK_INT >= 33) {
+                ctx.registerReceiver(r, f, null, handler, Context.RECEIVER_EXPORTED);
             } else {
-                ctx.registerReceiver(r, f);
+                ctx.registerReceiver(r, f, null, handler);
             }
         } catch (Throwable t) {
             XLog.e("registerConfigListener failed");
@@ -100,18 +107,101 @@ public final class NfcHook {
         }
     }
 
-    private static void installDispatchHook(ClassLoader cl) {
+    private static boolean installDispatchHook(ClassLoader cl) {
+        if (Build.VERSION.SDK_INT >= 37) {
+            try {
+                // Both direct NFC dispatch and a confirmed NFC notification reach this call.
+                XposedHelpers.findAndHookMethod(Activity.class, "startActivityAsUser",
+                        Intent.class, Bundle.class, UserHandle.class, forwardHook);
+                XLog.i("dispatch hook installed on NFC activity forwarding");
+                return true;
+            } catch (Throwable t) {
+                XLog.e("NFC activity forwarding hook unavailable");
+                XLog.e(t);
+            }
+        }
         try {
             Class<?> contextImpl = XposedHelpers.findClass("android.app.ContextImpl", cl);
-            XposedBridge.hookAllMethods(contextImpl, "startActivityAsUser", redirectHook);
+            if (XposedBridge.hookAllMethods(contextImpl, "startActivityAsUser", legacyHook).isEmpty()) {
+                XLog.e("ContextImpl.startActivityAsUser not found");
+                return false;
+            }
             XLog.i("dispatch hook installed on ContextImpl.startActivityAsUser");
+            return true;
         } catch (Throwable t) {
             XLog.e("installDispatchHook failed");
             XLog.e(t);
+            return false;
         }
     }
 
-    private static final XC_MethodHook redirectHook = new XC_MethodHook() {
+    private static final class ForwardState {
+        final Intent originalIntent;
+        final UserHandle originalUser;
+        final Cache config;
+
+        ForwardState(Intent originalIntent, UserHandle originalUser, Cache config) {
+            this.originalIntent = originalIntent;
+            this.originalUser = originalUser;
+            this.config = config;
+        }
+    }
+
+    private static final XC_MethodHook forwardHook = new XC_MethodHook() {
+        @Override
+        protected void beforeHookedMethod(MethodHookParam param) {
+            String activity = param.thisObject.getClass().getName();
+            boolean chooser = CHOOSER_ACTIVITY.equals(activity);
+            if (!chooser && !ROOT_ACTIVITY.equals(activity)) return;
+            Intent intent = (Intent) param.args[0];
+            if (intent == null || !isNfcForward(intent)) return;
+
+            Context ctx = (Context) param.thisObject;
+            Cache cfg = HookConfig.get(ctx, worker);
+            if (!cfg.enabled || !isAlipayDispatch(intent, cfg)) return;
+            if (chooser && intent.getComponent() == null) return;
+
+            UserHandle originalUser = (UserHandle) param.args[2];
+            ForwardState state = new ForwardState(intent, originalUser, cfg);
+            if (hasTarget(cfg)) {
+                Intent redirected = redirectIntent(intent, cfg);
+                if (redirected.getComponent() == null && redirected.getPackage() == null) {
+                    redirected.setPackage(alipayPackage(cfg));
+                }
+                UserHandle user = userHandleOf(cfg.targetUser);
+                param.args[0] = redirected;
+                param.args[2] = user;
+            }
+            param.setObjectExtra(FORWARD_STATE, state);
+        }
+
+        @Override
+        protected void afterHookedMethod(MethodHookParam param) {
+            ForwardState state = (ForwardState) param.getObjectExtra(FORWARD_STATE);
+            if (state == null) return;
+            String target = targetLabel(state.config);
+            Throwable failure = param.getThrowable();
+            if (hasTarget(state.config)
+                    && (failure instanceof ActivityNotFoundException || failure instanceof SecurityException)) {
+                param.args[0] = state.originalIntent;
+                param.args[2] = state.originalUser;
+                try {
+                    param.setResult(XposedBridge.invokeOriginalMethod(
+                            param.method, param.thisObject, param.args));
+                } catch (InvocationTargetException e) {
+                    param.setThrowable(e.getCause());
+                } catch (Throwable t) {
+                    param.setThrowable(t);
+                }
+                target = "system default (redirect failed)";
+            }
+            if (param.getThrowable() == null) {
+                record(appContext, state.originalIntent, state.config, target);
+            }
+        }
+    };
+
+    private static final XC_MethodHook legacyHook = new XC_MethodHook() {
         @Override
         protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
             try {
@@ -135,30 +225,17 @@ public final class NfcHook {
 
                 Context ctx = appContext != null ? appContext
                         : (param.thisObject instanceof Context ? (Context) param.thisObject : null);
-                Cache cfg = HookConfig.get(ctx);
-
-                XLog.i("nfc dispatch: action=" + inner.getAction()
-                        + " data=" + inner.getDataString()
-                        + " type=" + inner.getType()
-                        + " pkg=" + inner.getPackage()
-                        + " outerUser=" + (userIdx >= 0 ? args[userIdx] : "none")
-                        + " cfg=" + cfg.source + " enabled=" + cfg.enabled
-                        + " targetUser=" + cfg.targetUser + " targetPkg=" + cfg.targetPkg);
-
-                if (!cfg.enabled) return;
-                if (!isAlipayDispatch(inner, cfg)) return;
                 if (outer.getBooleanExtra(C.EXTRA_HANDLED, false)) return;
+                Cache cfg = HookConfig.get(ctx, worker);
+                if (!cfg.enabled || !isAlipayDispatch(inner, cfg)) return;
 
-                String from = inner.getComponent() != null
-                        ? inner.getComponent().flattenToString() : inner.getDataString();
-
-                if (cfg.targetUser == 0 && TextUtils.isEmpty(cfg.targetPkg)) {
+                if (!hasTarget(cfg)) {
                     outer.putExtra(C.EXTRA_HANDLED, true);
-                    record(ctx, inner, cfg, from, "user 0 (default)");
+                    record(ctx, inner, cfg, targetLabel(cfg));
                     return;
                 }
 
-                redirect(param, outer, inner, cfg, userIdx, from);
+                redirectLegacy(param, outer, inner, cfg, userIdx);
             } catch (Throwable t) {
                 XLog.e("redirectHook error");
                 XLog.e(t);
@@ -171,18 +248,40 @@ public final class NfcHook {
                 || C.ACTION_TECH.equals(action) || C.ACTION_TRANSACTION.equals(action);
     }
 
+    private static boolean isNfcForward(Intent intent) {
+        return isNfcAction(intent.getAction()) || (Intent.ACTION_VIEW.equals(intent.getAction())
+                && (intent.hasExtra(NfcAdapter.EXTRA_TAG) || intent.hasExtra(NfcAdapter.EXTRA_NDEF_MESSAGES)));
+    }
+
     static boolean isAlipayDispatch(Intent intent, Cache cfg) {
-        String alipayPkg = cfg.alipayPkg == null ? C.ALIPAY_PKG : cfg.alipayPkg;
+        String alipayPkg = alipayPackage(cfg);
         ComponentName cn = intent.getComponent();
-        if (cn != null && alipayPkg.equals(cn.getPackageName())) return true;
-        String pkg = intent.getPackage();
-        if (pkg != null && alipayPkg.equals(pkg)) return true;
-        return looksLikeAlipay(intent.getDataString()) || looksLikeAlipay(intent.getType());
+        String pkg = cn == null ? intent.getPackage() : cn.getPackageName();
+        if (pkg != null && !alipayPkg.equals(pkg)) return false;
+        if (Intent.ACTION_VIEW.equals(intent.getAction())) {
+            Uri uri = intent.getData();
+            if (uri == null || !("http".equalsIgnoreCase(uri.getScheme())
+                    || "https".equalsIgnoreCase(uri.getScheme()))) return false;
+            String host = uri.getHost();
+            if (host == null) return false;
+            String domain = host.toLowerCase(Locale.ROOT);
+            return domain.equals("alipay.com") || domain.endsWith(".alipay.com")
+                    || domain.equals("alipay.cn") || domain.endsWith(".alipay.cn")
+                    || domain.equals("alipayplus.com") || domain.endsWith(".alipayplus.com")
+                    || domain.equals("macaupass.com") || domain.endsWith(".macaupass.com")
+                    || ("https".equalsIgnoreCase(uri.getScheme()) && domain.equals("nfc"));
+        }
+        return pkg != null || looksLikeAlipay(intent.getDataString())
+                || looksLikeAlipay(intent.getType());
+    }
+
+    private static String alipayPackage(Cache cfg) {
+        return TextUtils.isEmpty(cfg.alipayPkg) ? C.ALIPAY_PKG : cfg.alipayPkg;
     }
 
     private static boolean looksLikeAlipay(String s) {
         if (s == null) return false;
-        String d = s.toLowerCase();
+        String d = s.toLowerCase(Locale.ROOT);
         return d.startsWith("alipays://") || d.startsWith("alipay:")
                 || d.contains("alipay.com") || d.contains("alipay.cn")
                 || d.contains("alipayplus.com") || d.contains("alipayobjects")
@@ -190,29 +289,32 @@ public final class NfcHook {
                 || d.startsWith("https://nfc/");
     }
 
-    /**
-     * Launches the dispatch intent directly as the target user from the u0 nfc context,
-     * bypassing NfcRootActivity. On MIUI clone users (u10/u999), NfcRootActivity's own
-     * forward resolves UserHandle.CURRENT to the foreground user (0), so main Alipay
-     * would open instead of the clone. Direct launch keeps everything in one hop; the
-     * NfcRootActivity extra mechanism stays as fallback.
-     */
-    private static void redirect(XC_MethodHook.MethodHookParam param, Intent outer, Intent inner,
-            Cache cfg, int userIdx, String original) {
+    private static boolean hasTarget(Cache cfg) {
+        return cfg.targetUser != 0 || !TextUtils.isEmpty(cfg.targetPkg);
+    }
+
+    private static String targetLabel(Cache cfg) {
+        return TextUtils.isEmpty(cfg.targetPkg)
+                ? (cfg.targetUser == 0 ? "user 0 (default)" : "user " + cfg.targetUser)
+                : "package " + cfg.targetPkg + " (user " + cfg.targetUser + ")";
+    }
+
+    private static Intent redirectIntent(Intent original, Cache cfg) {
+        Intent intent = new Intent(original).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        if (!TextUtils.isEmpty(cfg.targetPkg)) {
+            intent.setComponent(null);
+            intent.setPackage(cfg.targetPkg);
+        }
+        return intent;
+    }
+
+    /** HyperOS 3 and earlier use the dispatcher context directly. */
+    private static void redirectLegacy(XC_MethodHook.MethodHookParam param, Intent outer, Intent inner,
+            Cache cfg, int userIdx) {
         try {
-            Intent ni = new Intent(inner);
-            ni.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            Intent ni = redirectIntent(inner, cfg);
             boolean redirectUser = cfg.targetUser != 0;
-            boolean redirectPkg = !TextUtils.isEmpty(cfg.targetPkg);
-            if (redirectPkg) {
-                ni.setPackage(cfg.targetPkg);
-                ni.setComponent(null);
-            }
-            int targetUser = redirectUser ? cfg.targetUser : 0;
-            UserHandle uh = userHandleOf(targetUser);
-            String target = redirectPkg
-                    ? "package " + cfg.targetPkg + " (user " + targetUser + ")"
-                    : "user " + targetUser;
+            UserHandle uh = userHandleOf(cfg.targetUser);
             try {
                 // Same ContextImpl the dispatcher uses; NFC dispatch holds an app-switch
                 // window, and nfc uid has INTERACT_ACROSS_USERS for clone users.
@@ -220,7 +322,6 @@ public final class NfcHook {
                         ni, null, uh);
                 param.setResult(null);
                 outer.putExtra(C.EXTRA_HANDLED, true);
-                XLog.i("direct-launched: " + original + " -> " + target);
             } catch (Throwable directError) {
                 // Fallback: the stock NfcRootActivity extra mechanism.
                 outer.putExtra("launchIntent", ni);
@@ -231,7 +332,7 @@ public final class NfcHook {
                 outer.putExtra(C.EXTRA_HANDLED, true);
                 XLog.e("direct launch failed (" + directError + "), using rootIntent extras");
             }
-            record(appContext, ni, cfg, original, target);
+            record(appContext, inner, cfg, targetLabel(cfg));
         } catch (Throwable t) {
             XLog.e("redirect failed, falling back to original dispatch");
             XLog.e(t);
@@ -251,25 +352,37 @@ public final class NfcHook {
         }
     }
 
-    private static void record(Context ctx, Intent intent, Cache cfg, String from, String target) {
-        if (!cfg.keepHistory || ctx == null) return;
-        try {
-            JSONObject o = new JSONObject();
-            o.put("ts", System.currentTimeMillis());
-            o.put("uri", intent.getDataString());
-            o.put("action", intent.getAction());
-            o.put("from", from);
-            o.put("to", target);
-            o.put("revision", cfg.revision);
-            GStore.addRecord(ctx, o.toString());
-            Intent bi = new Intent(C.ACTION_RECORD);
-            bi.setPackage(C.MODULE_PKG);
-            bi.putExtra(C.EXTRA_JSON, o.toString());
-            ctx.sendBroadcast(bi);
-        } catch (Throwable t) {
-            XLog.e("record failed");
-            XLog.e(t);
-        }
+    private static void record(Context ctx, Intent intent, Cache cfg, String target) {
+        Handler handler = worker;
+        if (ctx == null || handler == null) return;
+        long timestamp = System.currentTimeMillis();
+        String action = intent.getAction();
+        String uri = intent.getDataString();
+        ComponentName component = intent.getComponent();
+        String from = component == null ? uri : component.flattenToString();
+        handler.post(() -> {
+            XLog.i("nfc dispatch: action=" + action + " -> " + target
+                    + " cfg=" + cfg.source + " revision=" + cfg.revision);
+            if (!cfg.keepHistory) return;
+            try {
+                JSONObject o = new JSONObject();
+                o.put("ts", timestamp);
+                o.put("uri", uri);
+                o.put("action", action);
+                o.put("from", from);
+                o.put("to", target);
+                o.put("revision", cfg.revision);
+                String json = o.toString();
+                GStore.addRecord(ctx, json);
+                Intent bi = new Intent(C.ACTION_RECORD);
+                bi.setPackage(C.MODULE_PKG);
+                bi.putExtra(C.EXTRA_JSON, json);
+                ctx.sendBroadcast(bi);
+            } catch (Throwable t) {
+                XLog.e("record failed");
+                XLog.e(t);
+            }
+        });
     }
 
     static void sendAlive(Context ctx, String process) {

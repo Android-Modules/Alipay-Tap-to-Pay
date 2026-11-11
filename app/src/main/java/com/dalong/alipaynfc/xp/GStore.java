@@ -19,10 +19,11 @@ public final class GStore {
 
     public static void markAlive(Context ctx, String process) {
         try {
-            JSONObject o = new JSONObject(
-                    Settings.Global.getString(ctx.getContentResolver(), C.GKEY_ALIVE) == null
-                            ? "{}" : Settings.Global.getString(ctx.getContentResolver(), C.GKEY_ALIVE));
+            String raw = Settings.Global.getString(ctx.getContentResolver(), C.GKEY_ALIVE);
+            JSONObject o = new JSONObject(raw == null ? "{}" : raw);
             o.put(process, System.currentTimeMillis());
+            o.put(process + "_boot", Settings.Global.getInt(ctx.getContentResolver(),
+                    Settings.Global.BOOT_COUNT, -1));
             Settings.Global.putString(ctx.getContentResolver(), C.GKEY_ALIVE, o.toString());
         } catch (Throwable t) {
             XLog.e("GStore.markAlive failed");

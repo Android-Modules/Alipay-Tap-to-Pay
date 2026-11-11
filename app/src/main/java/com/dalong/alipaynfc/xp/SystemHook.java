@@ -23,7 +23,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
  * Loaded inside system_server.
  * Enumerates Android users that have Alipay installed (system app-cloning runs the same
  * package under a hidden user id, usually 999) and reports the list to the module app.
- * Also relays REQUEST_SCAN / CONFIG_CHANGED broadcasts.
+ * Also handles scan and history-clear requests.
  */
 public final class SystemHook {
 
@@ -130,7 +130,6 @@ public final class SystemHook {
             IntentFilter f = new IntentFilter();
             f.addAction(C.ACTION_REQUEST_SCAN);
             f.addAction(C.ACTION_REQUEST_CLEAR);
-            f.addAction(C.ACTION_CONFIG_CHANGED);
             int flags = android.os.Build.VERSION.SDK_INT >= 33
                     ? android.content.Context.RECEIVER_EXPORTED : 0;
             sysCtx.registerReceiver(new BroadcastReceiver() {
@@ -141,8 +140,6 @@ public final class SystemHook {
                         handler.post(SystemHook::scanAndBroadcast);
                     } else if (C.ACTION_REQUEST_CLEAR.equals(action) && handler != null) {
                         handler.post(() -> GStore.clearRecords(sysCtx));
-                    } else if (C.ACTION_CONFIG_CHANGED.equals(action)) {
-                        HookConfig.invalidate();
                     }
                 }
             }, f, flags);

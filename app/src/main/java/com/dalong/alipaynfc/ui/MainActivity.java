@@ -10,6 +10,8 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
+import android.os.SystemClock;
+import android.provider.Settings;
 import android.text.Editable;
 import android.text.InputType;
 import android.text.TextWatcher;
@@ -214,13 +216,11 @@ public class MainActivity extends Activity {
     private void renderStatus() {
         try {
             String raw = Store.getAlive(this);
-            android.util.Log.i("AlipayNfcUI", "alive raw=" + raw
-                    + " users=" + Store.getUsers(this));
             JSONObject alive = new JSONObject(raw == null || raw.isEmpty() ? "{}" : raw);
-            long sys = alive.optLong("android", 0);
-            long nfc = alive.optLong("com.android.nfc", 0);
-            boolean sysOk = sys > 0;
-            boolean nfcOk = nfc > 0;
+            int boot = Settings.Global.getInt(getContentResolver(), Settings.Global.BOOT_COUNT, -1);
+            long bootTime = System.currentTimeMillis() - SystemClock.elapsedRealtime();
+            boolean sysOk = isAliveThisBoot(alive, "android", boot, bootTime);
+            boolean nfcOk = isAliveThisBoot(alive, C.NFC_PKG, boot, bootTime);
             String msg;
             int color;
             if (sysOk && nfcOk) {
@@ -241,6 +241,13 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             statusText.setText("○ 状态未知");
         }
+    }
+
+    private static boolean isAliveThisBoot(JSONObject alive, String process, int boot, long bootTime) {
+        int recordedBoot = alive.optInt(process + "_boot", -1);
+        if (boot >= 0 && recordedBoot >= 0) return boot == recordedBoot;
+        long heartbeat = alive.optLong(process, 0);
+        return heartbeat > 0 && heartbeat >= bootTime;
     }
 
     private void renderUsers() {
