@@ -19,9 +19,6 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Install Android SDK
-        run: sdkmanager --install 'platforms;android-36' 'build-tools;35.0.0'
-
       - name: Assemble unsigned release
         run: ./gradlew :app:assembleRelease -PunsignedRelease=true --no-daemon
 
