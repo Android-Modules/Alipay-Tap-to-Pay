@@ -1,5 +1,6 @@
 package com.dalong.alipaynfc.ui;
 
+import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -40,8 +41,10 @@ import org.json.JSONObject;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 /**
  * Main configuration screen: module status, Alipay instance selection,
@@ -93,12 +96,14 @@ public class MainActivity extends Activity {
 
     private final List<UserChoice> userChoices = new ArrayList<>();
     private final List<View> choiceDots = new ArrayList<>();
+    private final Set<Integer> scannedUserIds = new HashSet<>();
     private int selectedUserId = 0;
     private boolean isBinding = false;
     private boolean advancedExpanded = false;
     private boolean helpExpanded = false;
     private boolean initialExpansionApplied = false;
 
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -186,6 +191,8 @@ public class MainActivity extends Activity {
         c.targetUser = currentSelectionUserId();
         c.targetPkg = pkgModeSwitch.isChecked() ? pkgInput.getText().toString().trim() : "";
         c.keepHistory = historySwitch.isChecked();
+        selectedUserId = c.targetUser;
+        updateChoiceIndicators();
         Store.saveConfig(this, c);
         updateAdvancedSummary(c);
         try {
@@ -270,13 +277,7 @@ public class MainActivity extends Activity {
             }
             pkgInput.setVisibility(pkgMode ? View.VISIBLE : View.GONE);
 
-            boolean known = false;
-            for (UserChoice choice : userChoices) {
-                if (choice.userId == c.targetUser) {
-                    known = true;
-                    break;
-                }
-            }
+            boolean known = scannedUserIds.contains(c.targetUser);
             selectedUserId = c.targetUser;
             if (!userInput.hasFocus()) {
                 if (known) {
@@ -308,7 +309,9 @@ public class MainActivity extends Activity {
             usersListBox.removeAllViews();
             userChoices.clear();
             choiceDots.clear();
+            scannedUserIds.clear();
 
+            scannedUserIds.add(0);
             userChoices.add(new UserChoice(0, "主支付宝", "默认实例 · 用户 0"));
 
             String json = Store.getUsers(this);
@@ -321,6 +324,7 @@ public class MainActivity extends Activity {
                         int id = u.optInt("id", -1);
                         if (id == 0) continue;
                         if (!u.optBoolean("alipay", false)) continue;
+                        scannedUserIds.add(id);
                         String name = u.optString("name", "");
                         if (id == 999) {
                             userChoices.add(new UserChoice(id, "多开支付宝", "系统分身 · 用户 999"));
@@ -333,13 +337,7 @@ public class MainActivity extends Activity {
             }
 
             Store.Config cur = Store.loadConfig(this);
-            boolean known = false;
-            for (UserChoice choice : userChoices) {
-                if (choice.userId == cur.targetUser) {
-                    known = true;
-                    break;
-                }
-            }
+            boolean known = scannedUserIds.contains(cur.targetUser);
             if (!known && cur.targetUser != 0) {
                 userChoices.add(new UserChoice(
                         cur.targetUser,

@@ -41,7 +41,8 @@ android {
                 "META-INF/LICENSE*",
                 "META-INF/NOTICE*",
                 "META-INF/DEPENDENCIES",
-                "META-INF/*.version"
+                "META-INF/*.version",
+                "kotlin/**"
             )
         }
     }

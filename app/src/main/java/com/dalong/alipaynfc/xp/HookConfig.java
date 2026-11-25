@@ -57,27 +57,28 @@ public final class HookConfig {
 
     /** Runs on the NFC worker, including after the settings UI broadcasts a change. */
     static void refresh(Context ctx, boolean configChanged) {
-        Cache primary = HookRuntime.isModern() ? loadRemotePrefs() : loadLegacyXsp();
-        Cache provider = loadProvider(ctx);
-
         Cache chosen;
         if (configChanged) {
-            if (provider.valid && (!primary.valid || provider.revision >= primary.revision)) {
-                chosen = provider;
-            } else {
-                chosen = primary.valid ? primary : provider;
+            // Explicit UI broadcast: prefer the app's in-memory ContentProvider snapshot first,
+            // and accept any valid revision (including reset after clearing app data).
+            Cache provider = loadProvider(ctx);
+            chosen = provider.valid ? provider
+                    : (HookRuntime.isModern() ? loadRemotePrefs() : loadLegacyXsp());
+            if (chosen.valid) {
+                cached = chosen;
             }
         } else {
-            if (primary.valid && (!provider.valid || primary.revision >= provider.revision)) {
+            Cache primary = HookRuntime.isModern() ? loadRemotePrefs() : loadLegacyXsp();
+            if (primary.valid && primary.revision >= cached.revision) {
                 chosen = primary;
             } else {
-                chosen = provider.valid ? provider : primary;
+                Cache provider = loadProvider(ctx);
+                chosen = (provider.valid && (!primary.valid || provider.revision >= primary.revision))
+                        ? provider : primary;
             }
-        }
-        if (chosen.valid && chosen.revision >= cached.revision) {
-            cached = chosen;
-        } else if (chosen.valid && !cached.valid) {
-            cached = chosen;
+            if (chosen.valid && (chosen.revision >= cached.revision || !cached.valid)) {
+                cached = chosen;
+            }
         }
         nextReloadElapsed = SystemClock.elapsedRealtime() + RELOAD_INTERVAL_MS;
     }

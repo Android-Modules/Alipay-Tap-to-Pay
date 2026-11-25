@@ -1,5 +1,6 @@
 package com.dalong.alipaynfc.xp;
 
+import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.Application;
 import android.content.ActivityNotFoundException;
@@ -79,6 +80,7 @@ public final class NfcHook {
         }
     }
 
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
     private static void registerConfigListener(Context ctx, Handler handler) {
         try {
             IntentFilter f = new IntentFilter();
@@ -154,6 +156,7 @@ public final class NfcHook {
     private static final HookRuntime.MethodCallback forwardHook = new HookRuntime.MethodCallback() {
         @Override
         protected void before(HookRuntime.HookParam param) {
+            if (param.thisObject == null) return;
             String activity = param.thisObject.getClass().getName();
             boolean chooser = CHOOSER_ACTIVITY.equals(activity);
             if (!chooser && !ROOT_ACTIVITY.equals(activity)) return;

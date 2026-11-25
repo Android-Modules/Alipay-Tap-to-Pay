@@ -7,6 +7,8 @@ import android.os.Looper;
 
 import com.dalong.alipaynfc.C;
 
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArraySet;
@@ -45,7 +47,15 @@ public final class FrameworkState {
                     boundService = service;
                     try {
                         List<String> scope = service.getScope();
-                        boundScope = scope == null ? null : Set.copyOf(scope);
+                        if (scope == null) {
+                            boundScope = null;
+                        } else {
+                            Set<String> clean = new HashSet<>();
+                            for (String item : scope) {
+                                if (item != null) clean.add(item);
+                            }
+                            boundScope = Collections.unmodifiableSet(clean);
+                        }
                     } catch (Throwable ignored) {
                     }
                     if (appContext != null) {

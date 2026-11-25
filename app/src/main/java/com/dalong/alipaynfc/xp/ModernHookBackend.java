@@ -133,7 +133,7 @@ final class ModernHookBackend implements HookRuntime.HookBackend {
         Set<Object> handles = new LinkedHashSet<>();
         for (Method m : clazz.getDeclaredMethods()) {
             if (methodName != null && !methodName.equals(m.getName())) continue;
-            if (Modifier.isAbstract(m.getModifiers())) continue;
+            if (Modifier.isAbstract(m.getModifiers()) || m.isBridge() || m.isSynthetic()) continue;
             Object handle = hook(m, callback);
             if (handle != null) {
                 handles.add(handle);
