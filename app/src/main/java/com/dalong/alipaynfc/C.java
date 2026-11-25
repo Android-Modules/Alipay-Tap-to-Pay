@@ -43,4 +43,13 @@ public final class C {
     public static final String ACTION_TAG = "android.nfc.action.TAG_DISCOVERED";
     public static final String ACTION_TECH = "android.nfc.action.TECH_DISCOVERED";
     public static final String ACTION_TRANSACTION = "android.nfc.action.TRANSACTION_DETECTED";
+
+    // External URLs and target packages for the About page.
+    public static final String URL_GITHUB_REPO = "https://github.com/Android-Modules/Alipay-Tap-to-Pay";
+    public static final String URL_GITHUB_ISSUES = "https://github.com/Android-Modules/Alipay-Tap-to-Pay/issues";
+    public static final String URL_GITHUB_RELEASES = "https://github.com/Android-Modules/Alipay-Tap-to-Pay/releases";
+    public static final String URL_GITHUB_PROFILE = "https://github.com/vs2pk0";
+    public static final String URL_COOLAPK = "https://www.coolapk.com/u/270261";
+    public static final String URL_MORE_APPS = "https://mount.sb996.cn/";
+    public static final String PKG_COOLAPK = "com.coolapk.market";
 }

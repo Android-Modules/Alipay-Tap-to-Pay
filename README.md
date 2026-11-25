@@ -84,3 +84,12 @@ adb install -r app/build/outputs/apk/release/app-release.apk
 ```
 
 [Build APK](https://github.com/Android-Modules/Alipay-Tap-to-Pay/actions/workflows/build-apk.yml) 可在 GitHub Actions 手动触发，产出 `alipay-nfc-switch-unsigned` 构建产物。发布时对该产物签名后上传至 Releases。
+
+## 赞赏支持
+
+如果碰一碰切换用得顺手，欢迎支持后续维护和系统适配。[在爱发电支持 Mount](https://afdian.com/a/mount-sb996) · [酷安](https://www.coolapk.com/u/270261) · [更多软件](https://mount.sb996.cn/)
+
+<p>
+  <img src="docs/images/donate_wechat.png" alt="微信赞赏收款码" width="185">
+  <img src="docs/images/donate_alipay.jpg" alt="支付宝赞赏收款码" width="185">
+</p>

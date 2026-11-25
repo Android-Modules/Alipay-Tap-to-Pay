@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <queries>
+        <package android:name="com.coolapk.market" />
+    </queries>
+
     <instrumentation
         android:name=".tap.TapInstrumentation"
         android:label="tap"
@@ -21,6 +25,11 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".ui.AboutActivity"
+            android:exported="false"
+            android:label="@string/about_title" />
 
         <receiver
             android:name=".data.ScanReceiver"

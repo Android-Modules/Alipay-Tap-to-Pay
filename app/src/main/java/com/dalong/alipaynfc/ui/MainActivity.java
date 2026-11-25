@@ -5,30 +5,33 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
-import android.content.res.TypedArray;
+import android.content.res.ColorStateList;
+import android.database.ContentObserver;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.LayerDrawable;
+import android.os.Build;
 import android.os.Bundle;
-import android.os.SystemClock;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.Settings;
 import android.text.Editable;
 import android.text.InputType;
+import android.text.TextUtils;
 import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
-import android.widget.Button;
-import android.widget.CompoundButton;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
-import android.widget.RadioButton;
-import android.widget.RadioGroup;
 import android.widget.ScrollView;
 import android.widget.Switch;
 import android.widget.TextView;
 
 import com.dalong.alipaynfc.C;
+import com.dalong.alipaynfc.R;
 import com.dalong.alipaynfc.data.Store;
 
 import org.json.JSONArray;
@@ -41,34 +44,66 @@ import java.util.List;
 import java.util.Locale;
 
 /**
- * GUI: pick which Alipay instance answers NFC tap-to-pay, toggle redirect, view records.
+ * Main configuration screen: module status, Alipay instance selection,
+ * redirect toggles, dispatch history, advanced overrides, and About entry.
  */
 public class MainActivity extends Activity {
 
-    private TextView statusText;
-    private RadioGroup targetGroup;
+    private static final class UserChoice {
+        final int userId;
+        final String title;
+        final String subtitle;
+
+        UserChoice(int userId, String title, String subtitle) {
+            this.userId = userId;
+            this.title = title;
+            this.subtitle = subtitle;
+        }
+    }
+
+    private LinearLayout statusCard;
+    private TextView statusHeadline;
+    private TextView statusVersion;
+    private LinearLayout statusChipRow;
+    private TextView statusHint;
+
+    private LinearLayout usersListBox;
+    private TextView usersHint;
+
     private Switch enableSwitch;
     private Switch historySwitch;
-    private LinearLayout pkgModeRow;
+
+    private TextView recordsCountText;
+    private LinearLayout recordsBox;
+    private TextView recordsEmpty;
+
+    private TextView advancedSummary;
+    private TextView advancedToggleText;
+    private LinearLayout advancedBody;
     private Switch pkgModeSwitch;
     private EditText pkgInput;
     private EditText userInput;
-    private LinearLayout recordsBox;
-    private TextView recordsEmpty;
-    private LinearLayout usersBox;
-    private TextView usersHint;
+
+    private TextView helpToggleText;
+    private TextView helpBody;
 
     private BroadcastReceiver receiver;
+    private ContentObserver contentObserver;
     private final SimpleDateFormat timeFmt = new SimpleDateFormat("MM-dd HH:mm:ss", Locale.CHINA);
 
-    // User entries shown in the radio list: {id, label}
-    private final List<int[]> userChoices = new ArrayList<>();
-    private final List<String> userLabels = new ArrayList<>();
+    private final List<UserChoice> userChoices = new ArrayList<>();
+    private final List<View> choiceDots = new ArrayList<>();
+    private int selectedUserId = 0;
+    private boolean isBinding = false;
+    private boolean advancedExpanded = false;
+    private boolean helpExpanded = false;
+    private boolean initialExpansionApplied = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(buildUi());
+        UiKit.applySystemBars(this);
 
         receiver = new BroadcastReceiver() {
             @Override
@@ -77,35 +112,35 @@ public class MainActivity extends Activity {
                 if (C.ACTION_SCAN_RESULT.equals(action) || C.ACTION_HOOK_ALIVE.equals(action)) {
                     runOnUiThread(MainActivity.this::refreshAll);
                 } else if (C.ACTION_RECORD.equals(action)) {
-                    runOnUiThread(() -> renderRecords());
+                    runOnUiThread(MainActivity.this::renderRecords);
                 }
             }
         };
-        IntentFilter f = new IntentFilter();
-        f.addAction(C.ACTION_SCAN_RESULT);
-        f.addAction(C.ACTION_HOOK_ALIVE);
-        f.addAction(C.ACTION_RECORD);
-        if (android.os.Build.VERSION.SDK_INT >= 33) {
-            registerReceiver(receiver, f, android.content.Context.RECEIVER_EXPORTED);
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(C.ACTION_SCAN_RESULT);
+        filter.addAction(C.ACTION_HOOK_ALIVE);
+        filter.addAction(C.ACTION_RECORD);
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
         } else {
-            registerReceiver(receiver, f);
+            registerReceiver(receiver, filter);
         }
 
         // Hooks publish state via Settings.Global; observe changes for live UI refresh.
-        android.database.ContentObserver observer = new android.database.ContentObserver(null) {
+        contentObserver = new ContentObserver(new Handler(Looper.getMainLooper())) {
             @Override
             public void onChange(boolean selfChange) {
                 runOnUiThread(MainActivity.this::refreshAll);
             }
         };
         getContentResolver().registerContentObserver(
-                android.provider.Settings.Global.getUriFor(C.GKEY_ALIVE), true, observer);
+                Settings.Global.getUriFor(C.GKEY_ALIVE), true, contentObserver);
         getContentResolver().registerContentObserver(
-                android.provider.Settings.Global.getUriFor(C.GKEY_USERS), true, observer);
+                Settings.Global.getUriFor(C.GKEY_USERS), true, contentObserver);
         getContentResolver().registerContentObserver(
-                android.provider.Settings.Global.getUriFor(C.GKEY_RECORDS), true, observer);
+                Settings.Global.getUriFor(C.GKEY_RECORDS), true, contentObserver);
 
-        renderAll();
+        refreshAll();
         requestScan();
     }
 
@@ -119,13 +154,24 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        if (receiver != null) unregisterReceiver(receiver);
+        if (receiver != null) {
+            try {
+                unregisterReceiver(receiver);
+            } catch (Exception ignored) {
+            }
+            receiver = null;
+        }
+        if (contentObserver != null) {
+            try {
+                getContentResolver().unregisterContentObserver(contentObserver);
+            } catch (Exception ignored) {
+            }
+            contentObserver = null;
+        }
     }
 
     private void requestScan() {
         try {
-            // Action-only broadcast: the hooks' dynamically registered receivers
-            // (com.android.nfc / system_server) listen for this.
             sendBroadcast(new Intent(C.ACTION_REQUEST_SCAN));
         } catch (Exception ignored) {
         }
@@ -134,12 +180,14 @@ public class MainActivity extends Activity {
     // ---------------------------------------------------------------- persistence
 
     private void persist() {
+        if (isBinding) return;
         Store.Config c = new Store.Config();
         c.enabled = enableSwitch.isChecked();
         c.targetUser = currentSelectionUserId();
         c.targetPkg = pkgModeSwitch.isChecked() ? pkgInput.getText().toString().trim() : "";
         c.keepHistory = historySwitch.isChecked();
         Store.saveConfig(this, c);
+        updateAdvancedSummary(c);
         try {
             sendBroadcast(new Intent(C.ACTION_CONFIG_CHANGED));
         } catch (Exception ignored) {
@@ -147,7 +195,6 @@ public class MainActivity extends Activity {
     }
 
     private int currentSelectionUserId() {
-        // Manual user id (advanced) overrides the radio selection.
         if (userInput != null) {
             String manual = userInput.getText().toString().trim();
             if (!manual.isEmpty()) {
@@ -157,21 +204,7 @@ public class MainActivity extends Activity {
                 }
             }
         }
-        int checkedId = targetGroup.getCheckedRadioButtonId();
-        // Radio ids encode the index in userChoices, offset by 1000.
-        int idx = checkedId - 1000;
-        if (idx >= 0 && idx < userChoices.size()) return userChoices.get(idx)[1];
-        return 0;
-    }
-
-    private void selectUserInUi(int userId) {
-        for (int i = 0; i < userChoices.size(); i++) {
-            if (userChoices.get(i)[1] == userId) {
-                targetGroup.check(1000 + i);
-                return;
-            }
-        }
-        if (!userChoices.isEmpty()) targetGroup.check(1000); // fall back to main Alipay
+        return selectedUserId;
     }
 
     // ---------------------------------------------------------------- rendering
@@ -183,82 +216,100 @@ public class MainActivity extends Activity {
         renderSwitches();
     }
 
-    private void renderAll() {
-        refreshAll();
+    private void renderStatus() {
+        UiKit.AliveStatus st = UiKit.readAliveStatus(this);
+        statusVersion.setText("v" + UiKit.getAppVersionName(this));
+
+        int bgColor = UiKit.color(this, st.allActive ? R.color.bg_success_soft : R.color.bg_warn_soft);
+        statusCard.setBackground(UiKit.roundedRect(bgColor, UiKit.dpF(this, 20)));
+
+        if (st.allActive) {
+            statusHeadline.setText("模块已激活");
+            statusHeadline.setTextColor(UiKit.color(this, R.color.status_ok));
+            statusHint.setText("配置即时生效，触碰商家「碰一下」设备即可按所选实例响应。");
+        } else if (st.sysOk) {
+            statusHeadline.setText("部分作用域已激活");
+            statusHeadline.setTextColor(UiKit.color(this, R.color.status_warn));
+            statusHint.setText("system_server 已就绪，请解锁手机并开启 NFC 后再试。");
+        } else if (st.nfcOk) {
+            statusHeadline.setText("部分作用域已激活");
+            statusHeadline.setTextColor(UiKit.color(this, R.color.status_warn));
+            statusHint.setText("NFC 服务已就绪，请重启手机以加载 system_server 注入。");
+        } else {
+            statusHeadline.setText("未检测到模块注入");
+            statusHeadline.setTextColor(UiKit.color(this, R.color.status_warn));
+            statusHint.setText("请在 LSPosed 中启用本模块，勾选「Android 系统」和「NFC」并重启。");
+        }
+
+        statusChipRow.removeAllViews();
+        TextView sysChip = UiKit.statusChip(this, "system_server", st.sysOk);
+        TextView nfcChip = UiKit.statusChip(this, "NFC 服务", st.nfcOk);
+        LinearLayout.LayoutParams chipLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        chipLp.setMarginEnd(UiKit.dp(this, 8));
+        statusChipRow.addView(sysChip, chipLp);
+        statusChipRow.addView(nfcChip);
+
+        if (!initialExpansionApplied) {
+            initialExpansionApplied = true;
+            setHelpExpanded(!st.allActive);
+        }
     }
 
     private void renderSwitches() {
-        Store.Config c = Store.loadConfig(this);
-        enableSwitch.setChecked(c.enabled);
-        historySwitch.setChecked(c.keepHistory);
-        pkgModeSwitch.setChecked(!c.targetPkg.isEmpty());
-        pkgInput.setText(c.targetPkg);
-        pkgInput.setVisibility(pkgModeSwitch.isChecked() ? View.VISIBLE : View.GONE);
-        boolean known = false;
-        for (int[] choice : userChoices) {
-            if (choice[1] == c.targetUser) {
-                known = true;
-                break;
-            }
-        }
-        if (known) {
-            userInput.setText("");
-            selectUserInUi(c.targetUser);
-        } else if (c.targetUser != 0) {
-            android.util.Log.i("AlipayNfcUI", "renderSwitches: unknown target " + c.targetUser);
-            userInput.setText(String.valueOf(c.targetUser));
-        } else {
-            userInput.setText("");
-            selectUserInUi(0);
-        }
-    }
-
-    private void renderStatus() {
+        isBinding = true;
         try {
-            String raw = Store.getAlive(this);
-            JSONObject alive = new JSONObject(raw == null || raw.isEmpty() ? "{}" : raw);
-            int boot = Settings.Global.getInt(getContentResolver(), Settings.Global.BOOT_COUNT, -1);
-            long bootTime = System.currentTimeMillis() - SystemClock.elapsedRealtime();
-            boolean sysOk = isAliveThisBoot(alive, "android", boot, bootTime);
-            boolean nfcOk = isAliveThisBoot(alive, C.NFC_PKG, boot, bootTime);
-            String msg;
-            int color;
-            if (sysOk && nfcOk) {
-                msg = "● 模块已激活：system_server ✓  NFC 服务 ✓";
-                color = 0xFF1B8A3A;
-            } else if (sysOk) {
-                msg = "○ system_server ✓  NFC 服务待触发（开启 NFC 后生效）";
-                color = 0xFFB36600;
-            } else if (nfcOk) {
-                msg = "○ NFC 服务已激活 ✓  system_server 待重启手机后生效";
-                color = 0xFFB36600;
-            } else {
-                msg = "○ 未检测到注入，请在 LSPosed 中启用并重启手机";
-                color = 0xFFB36600;
-            }
-            statusText.setText(msg);
-            statusText.setTextColor(color);
-        } catch (Exception e) {
-            statusText.setText("○ 状态未知");
-        }
-    }
+            Store.Config c = Store.loadConfig(this);
+            enableSwitch.setChecked(c.enabled);
+            historySwitch.setChecked(c.keepHistory);
 
-    private static boolean isAliveThisBoot(JSONObject alive, String process, int boot, long bootTime) {
-        int recordedBoot = alive.optInt(process + "_boot", -1);
-        if (boot >= 0 && recordedBoot >= 0) return boot == recordedBoot;
-        long heartbeat = alive.optLong(process, 0);
-        return heartbeat > 0 && heartbeat >= bootTime;
+            boolean pkgMode = !c.targetPkg.isEmpty();
+            pkgModeSwitch.setChecked(pkgMode);
+            if (!pkgInput.hasFocus() && !pkgInput.getText().toString().equals(c.targetPkg)) {
+                pkgInput.setText(c.targetPkg);
+            }
+            pkgInput.setVisibility(pkgMode ? View.VISIBLE : View.GONE);
+
+            boolean known = false;
+            for (UserChoice choice : userChoices) {
+                if (choice.userId == c.targetUser) {
+                    known = true;
+                    break;
+                }
+            }
+            selectedUserId = c.targetUser;
+            if (!userInput.hasFocus()) {
+                if (known) {
+                    if (!userInput.getText().toString().isEmpty()) {
+                        userInput.setText("");
+                    }
+                } else if (c.targetUser != 0) {
+                    String val = String.valueOf(c.targetUser);
+                    if (!userInput.getText().toString().equals(val)) {
+                        userInput.setText(val);
+                    }
+                } else if (!userInput.getText().toString().isEmpty()) {
+                    userInput.setText("");
+                }
+            }
+            updateChoiceIndicators();
+            updateAdvancedSummary(c);
+
+            if ((pkgMode || (!known && c.targetUser != 0)) && !advancedExpanded) {
+                setAdvancedExpanded(true);
+            }
+        } finally {
+            isBinding = false;
+        }
     }
 
     private void renderUsers() {
         try {
-            targetGroup.removeAllViews();
+            usersListBox.removeAllViews();
             userChoices.clear();
-            userLabels.clear();
+            choiceDots.clear();
 
-            // Main Alipay is always present (user 0).
-            userChoices.add(new int[]{0, 0});
-            userLabels.add("主支付宝（默认）");
+            userChoices.add(new UserChoice(0, "主支付宝", "默认实例 · 用户 0"));
 
             String json = Store.getUsers(this);
             if (!json.isEmpty()) {
@@ -268,96 +319,211 @@ public class MainActivity extends Activity {
                     for (int i = 0; i < users.length(); i++) {
                         JSONObject u = users.getJSONObject(i);
                         int id = u.optInt("id", -1);
-                        if (id == 0) continue; // already added as main
+                        if (id == 0) continue;
                         if (!u.optBoolean("alipay", false)) continue;
-                        userChoices.add(new int[]{id, id});
                         String name = u.optString("name", "");
-                        userLabels.add(id == 999 ? "多开支付宝（用户分身 999）"
-                                : "支付宝实例（用户 " + id + (name.isEmpty() ? "" : "，" + name) + "）");
+                        if (id == 999) {
+                            userChoices.add(new UserChoice(id, "多开支付宝", "系统分身 · 用户 999"));
+                        } else {
+                            String title = name.isEmpty() ? "支付宝实例" : name;
+                            userChoices.add(new UserChoice(id, title, "Android 用户 " + id));
+                        }
                     }
                 }
             }
 
-            boolean scanned = !json.isEmpty();
-            // Always surface the currently selected target so the choice stays visible
-            // even before the system_server scan populates the list.
             Store.Config cur = Store.loadConfig(this);
             boolean known = false;
-            for (int[] choice : userChoices) {
-                if (choice[1] == cur.targetUser) {
+            for (UserChoice choice : userChoices) {
+                if (choice.userId == cur.targetUser) {
                     known = true;
                     break;
                 }
             }
             if (!known && cur.targetUser != 0) {
-                userChoices.add(new int[]{cur.targetUser, cur.targetUser});
-                userLabels.add(cur.targetUser == 999 ? "多开支付宝（用户 999）"
-                        : "支付宝实例（用户 " + cur.targetUser + "）");
+                userChoices.add(new UserChoice(
+                        cur.targetUser,
+                        cur.targetUser == 999 ? "多开支付宝" : "自定义支付宝实例",
+                        "手动指定 · 用户 " + cur.targetUser));
             }
 
-            usersHint.setVisibility(
-                    scanned && userChoices.size() > 1 ? View.GONE : View.VISIBLE);
-            usersHint.setText(scanned
-                    ? "未发现其他支付宝实例。如果本机使用第三方多开容器，请展开“高级”使用包名模式。"
-                    : "重启手机后自动扫描；也可以在“高级”里手动指定用户 ID。");
-
-            targetGroup.setOnCheckedChangeListener(null);
-            targetGroup.clearCheck(); // RadioGroup keeps stale mCheckedId after removeAllViews;
-                                      // without this, check() is short-circuited and the new
-                                      // radio never renders as selected.
-            Store.Config cfg = Store.loadConfig(this);
-            android.util.Log.i("AlipayNfcUI", "renderUsers: choices=" + userChoices.size()
-                    + " target=" + cfg.targetUser);
+            selectedUserId = cur.targetUser;
             for (int i = 0; i < userChoices.size(); i++) {
-                RadioButton rb = new RadioButton(this);
-                rb.setText(userLabels.get(i));
-                rb.setId(1000 + i);
-                rb.setTextSize(16);
-                rb.setPadding(dp(4), dp(10), dp(4), dp(10));
-                targetGroup.addView(rb, new RadioGroup.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-                if (userChoices.get(i)[1] == cfg.targetUser) {
-                    targetGroup.check(1000 + i);
-                    android.util.Log.i("AlipayNfcUI", "renderUsers: checked index " + i);
+                if (i > 0) {
+                    usersListBox.addView(UiKit.divider(this, 16));
                 }
+                usersListBox.addView(buildChoiceRow(userChoices.get(i)));
             }
-            targetGroup.setOnCheckedChangeListener((group, checkedId) -> persist());
+            updateChoiceIndicators();
+
+            boolean scanned = !json.isEmpty();
+            if (scanned && userChoices.size() > 1) {
+                usersHint.setVisibility(View.GONE);
+            } else {
+                usersHint.setVisibility(View.VISIBLE);
+                usersHint.setText(scanned
+                        ? "未扫描到其他用户空间中的支付宝。如使用第三方多开容器，请展开下方「高级设置」。"
+                        : "重启手机后自动扫描分身实例，或点击右上角「重新扫描」。");
+            }
         } catch (Exception e) {
-            usersHint.setText("解析扫描结果失败: " + e);
+            usersHint.setVisibility(View.VISIBLE);
+            usersHint.setText("解析扫描结果失败：" + e.getMessage());
+        }
+    }
+
+    private View buildChoiceRow(UserChoice choice) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setClickable(true);
+        row.setFocusable(true);
+        row.setBackground(UiKit.rippleBg(this, Color.TRANSPARENT, 0));
+        row.setPadding(UiKit.dp(this, 16), UiKit.dp(this, 13),
+                UiKit.dp(this, 16), UiKit.dp(this, 13));
+
+        LinearLayout textCol = new LinearLayout(this);
+        textCol.setOrientation(LinearLayout.VERTICAL);
+
+        TextView title = new TextView(this);
+        title.setText(choice.title);
+        title.setTextSize(15.5f);
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        title.setTextColor(UiKit.color(this, R.color.text_primary));
+        textCol.addView(title);
+
+        TextView sub = new TextView(this);
+        sub.setText(choice.subtitle);
+        sub.setTextSize(12.5f);
+        sub.setTextColor(UiKit.color(this, R.color.text_secondary));
+        sub.setPadding(0, UiKit.dp(this, 2), 0, 0);
+        textCol.addView(sub);
+
+        row.addView(textCol, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        View dot = new View(this);
+        int size = UiKit.dp(this, 20);
+        LinearLayout.LayoutParams dotLp = new LinearLayout.LayoutParams(size, size);
+        dotLp.setMarginStart(UiKit.dp(this, 12));
+        row.addView(dot, dotLp);
+        choiceDots.add(dot);
+
+        row.setOnClickListener(v -> {
+            selectedUserId = choice.userId;
+            isBinding = true;
+            try {
+                if (userInput != null && !userInput.getText().toString().isEmpty()) {
+                    userInput.setText("");
+                }
+            } finally {
+                isBinding = false;
+            }
+            updateChoiceIndicators();
+            persist();
+        });
+        return row;
+    }
+
+    private void updateChoiceIndicators() {
+        for (int i = 0; i < userChoices.size() && i < choiceDots.size(); i++) {
+            boolean checked = userChoices.get(i).userId == selectedUserId;
+            styleRadioDot(choiceDots.get(i), checked);
+        }
+    }
+
+    private void styleRadioDot(View dot, boolean checked) {
+        if (checked) {
+            int brand = UiKit.color(this, R.color.brand_primary);
+            GradientDrawable outer = new GradientDrawable();
+            outer.setShape(GradientDrawable.OVAL);
+            outer.setColor(Color.TRANSPARENT);
+            outer.setStroke(UiKit.dp(this, 2), brand);
+
+            GradientDrawable inner = new GradientDrawable();
+            inner.setShape(GradientDrawable.OVAL);
+            inner.setColor(brand);
+
+            LayerDrawable layered = new LayerDrawable(new GradientDrawable[]{outer, inner});
+            int inset = UiKit.dp(this, 5);
+            layered.setLayerInset(1, inset, inset, inset, inset);
+            dot.setBackground(layered);
+        } else {
+            GradientDrawable ring = new GradientDrawable();
+            ring.setShape(GradientDrawable.OVAL);
+            ring.setColor(Color.TRANSPARENT);
+            ring.setStroke(Math.max(2, UiKit.dp(this, 1)), UiKit.color(this, R.color.text_tertiary));
+            dot.setBackground(ring);
         }
     }
 
     private void renderRecords() {
         recordsBox.removeAllViews();
         JSONArray records = Store.getRecords(this);
-        recordsEmpty.setVisibility(records.length() == 0 ? View.VISIBLE : View.GONE);
-        for (int i = 0; i < records.length(); i++) {
+        int count = records.length();
+        recordsCountText.setText(count > 0 ? " (" + count + ")" : "");
+        recordsEmpty.setVisibility(count == 0 ? View.VISIBLE : View.GONE);
+
+        for (int i = 0; i < count; i++) {
             try {
                 JSONObject r = records.getJSONObject(i);
+                if (i > 0) {
+                    recordsBox.addView(UiKit.divider(this, 16));
+                }
                 LinearLayout row = new LinearLayout(this);
                 row.setOrientation(LinearLayout.VERTICAL);
-                row.setPadding(dp(8), dp(8), dp(8), dp(8));
+                row.setPadding(UiKit.dp(this, 16), UiKit.dp(this, 11),
+                        UiKit.dp(this, 16), UiKit.dp(this, 11));
 
                 TextView head = new TextView(this);
                 head.setText(timeFmt.format(new Date(r.optLong("ts")))
                         + "  →  " + r.optString("to", "?"));
-                head.setTypeface(Typeface.DEFAULT_BOLD);
-                head.setTextSize(14);
+                head.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+                head.setTextSize(13.5f);
+                head.setTextColor(UiKit.color(this, R.color.text_primary));
                 row.addView(head);
 
                 String from = r.optString("from", "");
                 String uri = r.optString("uri", "");
-                TextView sub = new TextView(this);
-                String detail = from == null || from.isEmpty() ? uri : from;
-                sub.setText(detail.length() > 120 ? detail.substring(0, 120) + "…" : detail);
-                sub.setTextSize(12);
-                sub.setAlpha(0.7f);
-                row.addView(sub);
-
+                String detail = (from == null || from.isEmpty()) ? uri : from;
+                if (detail != null && !detail.isEmpty()) {
+                    TextView sub = new TextView(this);
+                    sub.setText(detail.length() > 120 ? detail.substring(0, 120) + "…" : detail);
+                    sub.setTextSize(12);
+                    sub.setTextColor(UiKit.color(this, R.color.text_secondary));
+                    sub.setPadding(0, UiKit.dp(this, 2), 0, 0);
+                    row.addView(sub);
+                }
                 recordsBox.addView(row);
             } catch (Exception ignored) {
             }
         }
+    }
+
+    private void updateAdvancedSummary(Store.Config c) {
+        if (advancedSummary == null) return;
+        boolean hasPkg = c.targetPkg != null && !c.targetPkg.isEmpty();
+        boolean hasManualUser = userInput != null && !userInput.getText().toString().trim().isEmpty();
+        if (hasPkg && hasManualUser) {
+            advancedSummary.setText("已启用包名重定向（" + c.targetPkg + "）· 用户 " + c.targetUser);
+        } else if (hasPkg) {
+            advancedSummary.setText("已启用包名重定向：" + c.targetPkg);
+        } else if (hasManualUser) {
+            advancedSummary.setText("已手动指定用户 ID：" + c.targetUser);
+        } else {
+            advancedSummary.setText("包名重定向与手动指定用户 ID（系统分身无需开启）");
+        }
+    }
+
+    private void setAdvancedExpanded(boolean expanded) {
+        advancedExpanded = expanded;
+        advancedBody.setVisibility(expanded ? View.VISIBLE : View.GONE);
+        advancedToggleText.setText(expanded ? "收起 ▴" : "展开 ▾");
+    }
+
+    private void setHelpExpanded(boolean expanded) {
+        helpExpanded = expanded;
+        helpBody.setVisibility(expanded ? View.VISIBLE : View.GONE);
+        helpToggleText.setText(expanded ? "收起 ▴" : "展开 ▾");
     }
 
     // ---------------------------------------------------------------- UI builder
@@ -365,186 +531,420 @@ public class MainActivity extends Activity {
     private View buildUi() {
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
+        scroll.setFitsSystemWindows(true);
+        scroll.setBackgroundColor(UiKit.color(this, R.color.bg_page));
+
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(18), dp(16), dp(18), dp(28));
-        scroll.addView(root, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT));
+        root.setPadding(UiKit.dp(this, 16), UiKit.dp(this, 14),
+                UiKit.dp(this, 16), UiKit.dp(this, 28));
+        scroll.addView(root, new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        // Header
+        // 1. Header matching ppx MainActivity top bar
         LinearLayout header = new LinearLayout(this);
         header.setOrientation(LinearLayout.HORIZONTAL);
         header.setGravity(Gravity.CENTER_VERTICAL);
+        header.setPadding(UiKit.dp(this, 4), UiKit.dp(this, 2),
+                UiKit.dp(this, 4), UiKit.dp(this, 12));
+
+        header.addView(UiKit.appIconBadge(this, 44, 14));
+
+        LinearLayout titleCol = new LinearLayout(this);
+        titleCol.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams titleColLp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        titleColLp.setMarginStart(UiKit.dp(this, 12));
+
         TextView title = new TextView(this);
-        title.setText("碰一碰切换");
-        title.setTextSize(24);
+        title.setText(R.string.app_name);
+        title.setTextSize(22);
         title.setTypeface(Typeface.DEFAULT_BOLD);
-        header.addView(title, new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        TextView logo = new TextView(this);
-        logo.setText("📶");
-        logo.setTextSize(26);
-        header.addView(logo);
+        title.setTextColor(UiKit.color(this, R.color.text_primary));
+        titleCol.addView(title);
+
+        TextView subtitle = new TextView(this);
+        subtitle.setText("自定义 NFC 碰一碰响应的支付宝");
+        subtitle.setTextSize(12.5f);
+        subtitle.setTextColor(UiKit.color(this, R.color.text_secondary));
+        subtitle.setPadding(0, UiKit.dp(this, 1), 0, 0);
+        titleCol.addView(subtitle);
+
+        header.addView(titleCol, titleColLp);
+
+        TextView aboutBtn = UiKit.pillButton(this, "关于",
+                v -> startActivity(new Intent(this, AboutActivity.class)));
+        header.addView(aboutBtn);
         root.addView(header);
 
-        statusText = new TextView(this);
-        statusText.setTextSize(13);
-        statusText.setPadding(0, dp(6), 0, dp(12));
-        root.addView(statusText);
+        // 2. Hero status card
+        statusCard = UiKit.card(this, UiKit.color(this, R.color.bg_warn_soft), 20);
+        statusCard.setPadding(UiKit.dp(this, 18), UiKit.dp(this, 16),
+                UiKit.dp(this, 18), UiKit.dp(this, 16));
 
-        // Card: target selection
-        LinearLayout card1 = card();
-        card1.addView(sectionTitle("碰一碰目标"));
-        card1.addView(sectionDesc("选择 NFC 碰一碰（碰一下）时由哪个支付宝响应。修改即时生效，无需重启。"));
-        usersHint = sectionDesc("正在扫描支付宝实例…");
-        card1.addView(usersHint);
-        targetGroup = new RadioGroup(this);
-        targetGroup.setOrientation(RadioGroup.VERTICAL);
-        card1.addView(targetGroup);
-        root.addView(card1, cardLp());
+        LinearLayout statusTop = new LinearLayout(this);
+        statusTop.setOrientation(LinearLayout.HORIZONTAL);
+        statusTop.setGravity(Gravity.CENTER_VERTICAL);
 
-        // Card: switches
-        LinearLayout card2 = card();
-        enableSwitch = switchRow(card2, "启用碰一碰重定向", "关闭后 NFC 派发恢复系统默认行为");
-        historySwitch = switchRow(card2, "保存碰一碰记录", "每次碰一碰派发都会记录到下方列表");
-        root.addView(card2, cardLp());
+        statusHeadline = new TextView(this);
+        statusHeadline.setTextSize(17);
+        statusHeadline.setTypeface(Typeface.DEFAULT_BOLD);
+        statusTop.addView(statusHeadline, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-        // Card: records
-        LinearLayout card3 = card();
+        statusVersion = new TextView(this);
+        statusVersion.setTextSize(12);
+        statusVersion.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        statusVersion.setTextColor(UiKit.color(this, R.color.text_secondary));
+        statusTop.addView(statusVersion);
+        statusCard.addView(statusTop);
+
+        statusChipRow = new LinearLayout(this);
+        statusChipRow.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams chipsLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        chipsLp.topMargin = UiKit.dp(this, 10);
+        statusCard.addView(statusChipRow, chipsLp);
+
+        statusHint = new TextView(this);
+        statusHint.setTextSize(12.5f);
+        statusHint.setLineSpacing(UiKit.dpF(this, 2), 1f);
+        statusHint.setTextColor(UiKit.color(this, R.color.text_secondary));
+        LinearLayout.LayoutParams hintLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        hintLp.topMargin = UiKit.dp(this, 10);
+        statusCard.addView(statusHint, hintLp);
+
+        root.addView(statusCard);
+
+        // 3. Target selection
+        root.addView(UiKit.sectionLabel(this, "碰一碰目标"), sectionLp());
+        LinearLayout targetCard = UiKit.card(this, UiKit.color(this, R.color.bg_card), 20);
+
+        LinearLayout targetHeader = new LinearLayout(this);
+        targetHeader.setOrientation(LinearLayout.HORIZONTAL);
+        targetHeader.setGravity(Gravity.CENTER_VERTICAL);
+        targetHeader.setPadding(UiKit.dp(this, 16), UiKit.dp(this, 12),
+                UiKit.dp(this, 10), UiKit.dp(this, 10));
+
+        TextView targetSub = new TextView(this);
+        targetSub.setText("选择由哪个支付宝响应，修改即时生效");
+        targetSub.setTextSize(13);
+        targetSub.setTextColor(UiKit.color(this, R.color.text_secondary));
+        targetHeader.addView(targetSub, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        TextView rescanBtn = UiKit.textActionButton(this, "重新扫描", v -> {
+            usersHint.setVisibility(View.VISIBLE);
+            usersHint.setText("正在扫描支付宝实例…");
+            requestScan();
+        });
+        targetHeader.addView(rescanBtn);
+        targetCard.addView(targetHeader);
+        targetCard.addView(UiKit.divider(this, 16));
+
+        usersListBox = new LinearLayout(this);
+        usersListBox.setOrientation(LinearLayout.VERTICAL);
+        targetCard.addView(usersListBox);
+
+        usersHint = new TextView(this);
+        usersHint.setText("正在扫描支付宝实例…");
+        usersHint.setTextSize(12.5f);
+        usersHint.setLineSpacing(UiKit.dpF(this, 2), 1f);
+        usersHint.setTextColor(UiKit.color(this, R.color.text_secondary));
+        usersHint.setPadding(UiKit.dp(this, 16), UiKit.dp(this, 8),
+                UiKit.dp(this, 16), UiKit.dp(this, 14));
+        targetCard.addView(usersHint);
+        root.addView(targetCard, cardLp());
+
+        // 4. General switches
+        root.addView(UiKit.sectionLabel(this, "常规设置"), sectionLp());
+        LinearLayout switchCard = UiKit.card(this, UiKit.color(this, R.color.bg_card), 20);
+        enableSwitch = addSwitchRow(switchCard,
+                "启用碰一碰重定向",
+                "关闭后 NFC 派发恢复系统默认行为");
+        switchCard.addView(UiKit.divider(this, 16));
+        historySwitch = addSwitchRow(switchCard,
+                "保存碰一碰记录",
+                "记录最近 30 条 NFC 派发时间与去向");
+        root.addView(switchCard, cardLp());
+
+        // 5. Dispatch records
+        root.addView(UiKit.sectionLabel(this, "派发记录"), sectionLp());
+        LinearLayout recCard = UiKit.card(this, UiKit.color(this, R.color.bg_card), 20);
+
         LinearLayout recHeader = new LinearLayout(this);
         recHeader.setOrientation(LinearLayout.HORIZONTAL);
         recHeader.setGravity(Gravity.CENTER_VERTICAL);
-        TextView recTitle = sectionTitle("碰一碰记录");
-        recTitle.setPadding(0, 0, dp(8), 0);
-        recHeader.addView(recTitle, new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        Button clearBtn = new Button(this, null, android.R.attr.buttonBarButtonStyle);
-        clearBtn.setText("清空");
-        clearBtn.setOnClickListener(v -> {
+        recHeader.setPadding(UiKit.dp(this, 16), UiKit.dp(this, 10),
+                UiKit.dp(this, 10), UiKit.dp(this, 10));
+
+        LinearLayout recTitleWrap = new LinearLayout(this);
+        recTitleWrap.setOrientation(LinearLayout.HORIZONTAL);
+        recTitleWrap.setGravity(Gravity.CENTER_VERTICAL);
+
+        TextView recTitle = new TextView(this);
+        recTitle.setText("最近记录");
+        recTitle.setTextSize(15.5f);
+        recTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        recTitle.setTextColor(UiKit.color(this, R.color.text_primary));
+        recTitleWrap.addView(recTitle);
+
+        recordsCountText = new TextView(this);
+        recordsCountText.setTextSize(13);
+        recordsCountText.setTextColor(UiKit.color(this, R.color.text_secondary));
+        recTitleWrap.addView(recordsCountText);
+
+        recHeader.addView(recTitleWrap, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        TextView clearBtn = UiKit.textActionButton(this, "清空", v -> {
             Store.clearRecords(MainActivity.this);
             renderRecords();
         });
         recHeader.addView(clearBtn);
-        card3.addView(recHeader);
+        recCard.addView(recHeader);
+        recCard.addView(UiKit.divider(this, 16));
+
         recordsBox = new LinearLayout(this);
         recordsBox.setOrientation(LinearLayout.VERTICAL);
-        card3.addView(recordsBox);
-        recordsEmpty = sectionDesc("暂无记录。碰一次商家碰一碰设备后这里会出现派发日志。");
-        card3.addView(recordsEmpty);
-        root.addView(card3, cardLp());
+        recCard.addView(recordsBox);
 
-        // Card: advanced
-        LinearLayout card4 = card();
-        pkgModeSwitch = new Switch(this);
-        pkgModeSwitch.setText("高级：包名重定向模式");
-        pkgModeSwitch.setTextSize(15);
+        recordsEmpty = new TextView(this);
+        recordsEmpty.setText("暂无记录。碰一次商家碰一碰设备后这里会出现派发日志。");
+        recordsEmpty.setTextSize(13);
+        recordsEmpty.setTextColor(UiKit.color(this, R.color.text_secondary));
+        recordsEmpty.setPadding(UiKit.dp(this, 16), UiKit.dp(this, 14),
+                UiKit.dp(this, 16), UiKit.dp(this, 16));
+        recCard.addView(recordsEmpty);
+        root.addView(recCard, cardLp());
+
+        // 6. Collapsible advanced settings
+        root.addView(UiKit.sectionLabel(this, "高级设置"), sectionLp());
+        LinearLayout advCard = UiKit.card(this, UiKit.color(this, R.color.bg_card), 20);
+
+        LinearLayout advHeader = new LinearLayout(this);
+        advHeader.setOrientation(LinearLayout.HORIZONTAL);
+        advHeader.setGravity(Gravity.CENTER_VERTICAL);
+        advHeader.setClickable(true);
+        advHeader.setFocusable(true);
+        advHeader.setBackground(UiKit.rippleBg(this, Color.TRANSPARENT, 0));
+        advHeader.setPadding(UiKit.dp(this, 16), UiKit.dp(this, 14),
+                UiKit.dp(this, 16), UiKit.dp(this, 14));
+
+        LinearLayout advTitleCol = new LinearLayout(this);
+        advTitleCol.setOrientation(LinearLayout.VERTICAL);
+
+        TextView advTitle = new TextView(this);
+        advTitle.setText("包名重定向与用户 ID");
+        advTitle.setTextSize(15.5f);
+        advTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        advTitle.setTextColor(UiKit.color(this, R.color.text_primary));
+        advTitleCol.addView(advTitle);
+
+        advancedSummary = new TextView(this);
+        advancedSummary.setText("包名重定向与手动指定用户 ID（系统分身无需开启）");
+        advancedSummary.setTextSize(12.5f);
+        advancedSummary.setTextColor(UiKit.color(this, R.color.text_secondary));
+        advancedSummary.setPadding(0, UiKit.dp(this, 2), 0, 0);
+        advTitleCol.addView(advancedSummary);
+
+        advHeader.addView(advTitleCol, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        advancedToggleText = new TextView(this);
+        advancedToggleText.setText("展开 ▾");
+        advancedToggleText.setTextSize(13);
+        advancedToggleText.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        advancedToggleText.setTextColor(UiKit.color(this, R.color.brand_primary));
+        advancedToggleText.setPadding(UiKit.dp(this, 8), 0, 0, 0);
+        advHeader.addView(advancedToggleText);
+        advHeader.setOnClickListener(v -> setAdvancedExpanded(!advancedExpanded));
+        advCard.addView(advHeader);
+
+        advancedBody = new LinearLayout(this);
+        advancedBody.setOrientation(LinearLayout.VERTICAL);
+        advancedBody.setVisibility(View.GONE);
+        advancedBody.addView(UiKit.divider(this, 16));
+
+        pkgModeSwitch = addSwitchRow(advancedBody,
+                "包名重定向模式",
+                "适用于第三方多开容器（如虚拟机类 App）；系统级双开无需开启此项");
         pkgModeSwitch.setOnCheckedChangeListener((b, checked) -> {
             pkgInput.setVisibility(checked ? View.VISIBLE : View.GONE);
             persist();
         });
-        card4.addView(pkgModeSwitch, rowLp());
-        card4.addView(sectionDesc("适用于第三方多开容器（如虚拟机类 App）：启用后请填写容器内支付宝的宿主包名。系统级双开（用户分身）无需开启此项。"));
-        pkgInput = new EditText(this);
-        pkgInput.setHint("容器宿主包名，例如 com.xxx.parallel");
-        pkgInput.setInputType(InputType.TYPE_CLASS_TEXT);
-        pkgInput.setTextSize(14);
+
+        pkgInput = UiKit.styledInput(this, "容器宿主包名，例如 com.xxx.parallel", InputType.TYPE_CLASS_TEXT);
         pkgInput.setVisibility(View.GONE);
         pkgInput.addTextChangedListener(simpleWatcher());
-        card4.addView(pkgInput, rowLp());
+        LinearLayout.LayoutParams pkgLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        pkgLp.setMargins(UiKit.dp(this, 16), 0, UiKit.dp(this, 16), UiKit.dp(this, 14));
+        advancedBody.addView(pkgInput, pkgLp);
 
-        card4.addView(sectionTitle("手动指定用户 ID（可选）"));
-        card4.addView(sectionDesc("直接填写支付宝分身所在的 Android 用户 ID（如小米分身 999），填写后覆盖上方单选。"));
-        userInput = new EditText(this);
-        userInput.setHint("例如 999（留空使用上方单选）");
-        userInput.setInputType(InputType.TYPE_CLASS_NUMBER);
-        userInput.setTextSize(14);
+        advancedBody.addView(UiKit.divider(this, 16));
+
+        LinearLayout manualBox = new LinearLayout(this);
+        manualBox.setOrientation(LinearLayout.VERTICAL);
+        manualBox.setPadding(UiKit.dp(this, 16), UiKit.dp(this, 14),
+                UiKit.dp(this, 16), UiKit.dp(this, 16));
+
+        TextView manualTitle = new TextView(this);
+        manualTitle.setText("手动指定用户 ID（可选）");
+        manualTitle.setTextSize(15.5f);
+        manualTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        manualTitle.setTextColor(UiKit.color(this, R.color.text_primary));
+        manualBox.addView(manualTitle);
+
+        TextView manualDesc = new TextView(this);
+        manualDesc.setText("直接填写支付宝分身所在的 Android 用户 ID（如小米分身 999），填写后覆盖上方单选。");
+        manualDesc.setTextSize(12.5f);
+        manualDesc.setLineSpacing(UiKit.dpF(this, 2), 1f);
+        manualDesc.setTextColor(UiKit.color(this, R.color.text_secondary));
+        manualDesc.setPadding(0, UiKit.dp(this, 3), 0, UiKit.dp(this, 10));
+        manualBox.addView(manualDesc);
+
+        userInput = UiKit.styledInput(this, "例如 999（留空使用上方单选）", InputType.TYPE_CLASS_NUMBER);
         userInput.addTextChangedListener(simpleWatcher());
-        card4.addView(userInput, rowLp());
-        root.addView(card4, cardLp());
+        manualBox.addView(userInput);
 
-        // Card: help
-        LinearLayout card5 = card();
-        card5.addView(sectionTitle("使用说明"));
-        card5.addView(sectionDesc(
-                "1. 在 LSPosed 管理器中启用本模块，作用域勾选“Android 系统”和“NFC”，然后重启手机。\n"
-                + "2. 打开支付宝碰一碰功能，手机触碰商家“碰一下”设备即可验证。\n"
-                + "3. 切换目标后立即生效；记录列表可确认每次派发的实际去向。\n"
-                + "4. 若切到多开后碰一碰无反应，请检查多开支付宝已登录并已开通碰一碰功能。"));
-        root.addView(card5, cardLp());
+        advancedBody.addView(manualBox);
+        advCard.addView(advancedBody);
+        root.addView(advCard, cardLp());
 
-        // Rescan button
-        Button rescan = new Button(this);
-        rescan.setText("重新扫描支付宝实例");
-        rescan.setOnClickListener(v -> {
-            usersHint.setText("正在扫描支付宝实例…");
-            requestScan();
-        });
-        root.addView(rescan, rowLp());
+        // 7. Help & About section
+        root.addView(UiKit.sectionLabel(this, "帮助与关于"), sectionLp());
+
+        LinearLayout helpCard = UiKit.card(this, UiKit.color(this, R.color.bg_card), 20);
+        LinearLayout helpHeader = new LinearLayout(this);
+        helpHeader.setOrientation(LinearLayout.HORIZONTAL);
+        helpHeader.setGravity(Gravity.CENTER_VERTICAL);
+        helpHeader.setClickable(true);
+        helpHeader.setFocusable(true);
+        helpHeader.setBackground(UiKit.rippleBg(this, Color.TRANSPARENT, 0));
+        helpHeader.setPadding(UiKit.dp(this, 16), UiKit.dp(this, 14),
+                UiKit.dp(this, 16), UiKit.dp(this, 14));
+
+        TextView helpTitle = new TextView(this);
+        helpTitle.setText("使用说明");
+        helpTitle.setTextSize(15.5f);
+        helpTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        helpTitle.setTextColor(UiKit.color(this, R.color.text_primary));
+        helpHeader.addView(helpTitle, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        helpToggleText = new TextView(this);
+        helpToggleText.setText("展开 ▾");
+        helpToggleText.setTextSize(13);
+        helpToggleText.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        helpToggleText.setTextColor(UiKit.color(this, R.color.brand_primary));
+        helpHeader.addView(helpToggleText);
+        helpHeader.setOnClickListener(v -> setHelpExpanded(!helpExpanded));
+        helpCard.addView(helpHeader);
+
+        helpBody = new TextView(this);
+        helpBody.setText(
+                "1. 在 LSPosed 管理器中启用本模块，作用域勾选「Android 系统」和「NFC」，然后重启手机。\n"
+                        + "2. 开启手机 NFC 并解锁屏幕，触碰商家「碰一下」设备即可验证。\n"
+                        + "3. 切换目标后即时生效；派发记录可确认每次触发的实际去向。\n"
+                        + "4. 若切到分身后无反应，请确认分身支付宝已登录并已开通碰一碰功能。");
+        helpBody.setTextSize(13);
+        helpBody.setLineSpacing(UiKit.dpF(this, 3), 1f);
+        helpBody.setTextColor(UiKit.color(this, R.color.text_secondary));
+        helpBody.setPadding(UiKit.dp(this, 16), UiKit.dp(this, 2),
+                UiKit.dp(this, 16), UiKit.dp(this, 16));
+        helpBody.setVisibility(View.GONE);
+        helpCard.addView(helpBody);
+        root.addView(helpCard, cardLp());
+
+        LinearLayout aboutCard = UiKit.card(this, UiKit.color(this, R.color.bg_card), 20);
+        aboutCard.addView(UiKit.linkRow(
+                this,
+                "关于我们",
+                "酷安 · GitHub · 更多软件",
+                v -> startActivity(new Intent(this, AboutActivity.class))));
+        LinearLayout.LayoutParams aboutLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        aboutLp.topMargin = UiKit.dp(this, 10);
+        root.addView(aboutCard, aboutLp);
+
         return scroll;
     }
 
-    private LinearLayout card() {
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(16), dp(14), dp(16), dp(14));
-        card.setBackground(roundedBg());
-        return card;
+    private Switch addSwitchRow(LinearLayout parent, String titleText, String descText) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setClickable(true);
+        row.setFocusable(true);
+        row.setBackground(UiKit.rippleBg(this, Color.TRANSPARENT, 0));
+        row.setPadding(UiKit.dp(this, 16), UiKit.dp(this, 13),
+                UiKit.dp(this, 16), UiKit.dp(this, 13));
+
+        LinearLayout textCol = new LinearLayout(this);
+        textCol.setOrientation(LinearLayout.VERTICAL);
+
+        TextView title = new TextView(this);
+        title.setText(titleText);
+        title.setTextSize(15.5f);
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        title.setTextColor(UiKit.color(this, R.color.text_primary));
+        textCol.addView(title);
+
+        TextView desc = new TextView(this);
+        desc.setText(descText);
+        desc.setTextSize(12.5f);
+        desc.setLineSpacing(UiKit.dpF(this, 2), 1f);
+        desc.setTextColor(UiKit.color(this, R.color.text_secondary));
+        desc.setPadding(0, UiKit.dp(this, 2), 0, 0);
+        textCol.addView(desc);
+
+        row.addView(textCol, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        Switch sw = new Switch(this);
+        sw.setSaveEnabled(false);
+        styleSwitch(sw);
+        LinearLayout.LayoutParams swLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        swLp.setMarginStart(UiKit.dp(this, 12));
+        row.addView(sw, swLp);
+
+        sw.setOnCheckedChangeListener((b, checked) -> persist());
+        row.setOnClickListener(v -> sw.setChecked(!sw.isChecked()));
+
+        parent.addView(row);
+        return sw;
+    }
+
+    private void styleSwitch(Switch sw) {
+        if (Build.VERSION.SDK_INT >= 23) {
+            int brand = UiKit.color(this, R.color.brand_primary);
+            int offThumb = UiKit.isNightMode(this) ? 0xFFB0B7C5 : 0xFFFFFFFF;
+            int offTrack = UiKit.isNightMode(this) ? 0xFF3A3F4B : 0xFFD4D9E2;
+            int onTrack = (brand & 0x00FFFFFF) | 0x55000000;
+            int[][] states = new int[][]{
+                    new int[]{android.R.attr.state_checked},
+                    new int[]{}
+            };
+            sw.setThumbTintList(new ColorStateList(states, new int[]{brand, offThumb}));
+            sw.setTrackTintList(new ColorStateList(states, new int[]{onTrack, offTrack}));
+        }
+    }
+
+    private LinearLayout.LayoutParams sectionLp() {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = UiKit.dp(this, 14);
+        return lp;
     }
 
     private LinearLayout.LayoutParams cardLp() {
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.topMargin = dp(12);
+        lp.topMargin = UiKit.dp(this, 4);
         return lp;
-    }
-
-    private LinearLayout.LayoutParams rowLp() {
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.topMargin = dp(10);
-        return lp;
-    }
-
-    private TextView sectionTitle(String text) {
-        TextView tv = new TextView(this);
-        tv.setText(text);
-        tv.setTextSize(17);
-        tv.setTypeface(Typeface.DEFAULT_BOLD);
-        tv.setPadding(0, dp(2), 0, dp(6));
-        return tv;
-    }
-
-    private TextView sectionDesc(String text) {
-        TextView tv = new TextView(this);
-        tv.setText(text);
-        tv.setTextSize(13);
-        tv.setPadding(0, dp(4), 0, dp(4));
-        tv.setAlpha(0.75f);
-        return tv;
-    }
-
-    private Switch switchRow(LinearLayout parent, String text, String desc) {
-        Switch sw = new Switch(this);
-        sw.setText(text);
-        sw.setTextSize(15);
-        sw.setPadding(0, dp(6), 0, dp(2));
-        parent.addView(sw, rowLp());
-        TextView d = sectionDesc(desc);
-        d.setPadding(0, 0, 0, dp(8));
-        parent.addView(d);
-        sw.setOnCheckedChangeListener((b, checked) -> persist());
-        return sw;
-    }
-
-    private GradientDrawable roundedBg() {
-        GradientDrawable d = new GradientDrawable();
-        d.setShape(GradientDrawable.RECTANGLE);
-        d.setCornerRadius(dp(14));
-        TypedArray a = obtainStyledAttributes(new int[]{android.R.attr.colorBackgroundFloating});
-        int color = a.getColor(0, Color.WHITE);
-        a.recycle();
-        d.setColor(color);
-        return d;
     }
 
     private TextWatcher simpleWatcher() {
@@ -562,9 +962,5 @@ public class MainActivity extends Activity {
                 persist();
             }
         };
-    }
-
-    private int dp(int v) {
-        return Math.round(v * getResources().getDisplayMetrics().density);
     }
 }

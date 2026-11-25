@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg_page">#121418</color>
+    <color name="bg_card">#1C1F26</color>
+    <color name="bg_accent_soft">#1A273D</color>
+    <color name="bg_success_soft">#142B1F</color>
+    <color name="bg_warn_soft">#2E2212</color>
+    <color name="bg_input">#252932</color>
+    <color name="bg_chip">#252932</color>
+
+    <color name="brand_primary">#5B9BFF</color>
+    <color name="brand_on_primary">#0A1930</color>
+
+    <color name="status_ok">#4ADE80</color>
+    <color name="status_warn">#FBBF24</color>
+
+    <color name="text_primary">#F1F3F7</color>
+    <color name="text_secondary">#9CA3B2</color>
+    <color name="text_tertiary">#6E7585</color>
+
+    <color name="divider">#2A2E38</color>
+    <color name="ripple">#265B9BFF</color>
+</resources>

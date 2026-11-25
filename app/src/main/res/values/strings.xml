@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">碰一碰切换</string>
+    <string name="about_title">关于我们</string>
     <string name="xposed_description">切换支付宝碰一碰（NFC 标签派发）由主支付宝还是多开支付宝响应。作用于 com.android.nfc 与 system_server。</string>
 </resources>
