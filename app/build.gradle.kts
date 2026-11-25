@@ -6,7 +6,9 @@ val unsignedRelease = providers.gradleProperty("unsignedRelease").orNull == "tru
 
 android {
     namespace = "com.dalong.alipaynfc"
-    compileSdk = 36
+    compileSdk {
+        version = release(37)
+    }
 
     defaultConfig {
         applicationId = "com.dalong.alipaynfc"
@@ -32,7 +34,15 @@ android {
 
     packaging {
         resources {
-            excludes += "META-INF/**"
+            merges += "META-INF/xposed/*"
+            excludes += setOf(
+                "META-INF/AL2.0",
+                "META-INF/LGPL2.1",
+                "META-INF/LICENSE*",
+                "META-INF/NOTICE*",
+                "META-INF/DEPENDENCIES",
+                "META-INF/*.version"
+            )
         }
     }
 
@@ -43,4 +53,6 @@ android {
 
 dependencies {
     compileOnly(project(":xposed-stub"))
+    compileOnly("io.github.libxposed:api:102.0.0")
+    implementation("io.github.libxposed:service:102.0.0")
 }

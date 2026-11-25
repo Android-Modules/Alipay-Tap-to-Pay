@@ -1,10 +1,10 @@
 package com.dalong.alipaynfc.xp;
 
-import android.app.ActivityManager;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.UserManager;
@@ -14,10 +14,7 @@ import com.dalong.alipaynfc.C;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XposedBridge;
-import de.robv.android.xposed.XposedHelpers;
-import de.robv.android.xposed.callbacks.XC_LoadPackage;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Loaded inside system_server.
@@ -27,28 +24,28 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
  */
 public final class SystemHook {
 
+    private static final AtomicBoolean hookInstalled = new AtomicBoolean(false);
     private static volatile Context sysCtx;
     private static Handler handler;
     private static volatile boolean initialized;
 
     private SystemHook() {}
 
-    public static void init(XC_LoadPackage.LoadPackageParam lpp) {
-        XLog.i("loaded in system_server sdk=" + android.os.Build.VERSION.SDK_INT);
+    public static void init(ClassLoader cl) {
+        if (!hookInstalled.compareAndSet(false, true)) return;
+        XLog.i("loaded in system_server sdk=" + Build.VERSION.SDK_INT
+                + " modern=" + HookRuntime.isModern());
         try {
-            Class<?> systemServer = XposedHelpers.findClass("com.android.server.SystemServer",
-                    lpp.classLoader);
-            XposedBridge.hookAllMethods(systemServer, "startOtherServices", new XC_MethodHook() {
+            Class<?> systemServer = Reflect.findClass("com.android.server.SystemServer", cl);
+            HookRuntime.hookAllMethods(systemServer, "startOtherServices", new HookRuntime.MethodCallback() {
                 @Override
-                protected void afterHookedMethod(MethodHookParam param) {
+                protected void after(HookRuntime.HookParam param) {
                     try {
                         if (sysCtx != null) return;
-                        sysCtx = getSystemContext(lpp.classLoader);
+                        sysCtx = getSystemContext(cl);
                         if (sysCtx == null) {
-                            // Fall back to the historical field (pre-R ROMs).
                             try {
-                                sysCtx = (Context) XposedHelpers.getObjectField(
-                                        param.thisObject, "mContext");
+                                sysCtx = (Context) Reflect.getField(param.thisObject, "mContext");
                             } catch (Throwable ignored) {
                             }
                         }
@@ -57,7 +54,7 @@ public final class SystemHook {
                         HandlerThread ht = new HandlerThread("AlipayNfcSwitch");
                         ht.start();
                         handler = new Handler(ht.getLooper());
-                        hookSystemReady(lpp.classLoader);
+                        hookSystemReady(cl);
                         // Fallback trigger: AMS.systemReady may not be hookable on all ROMs.
                         handler.postDelayed(SystemHook::initialize, 8000);
                     } catch (Throwable t) {
@@ -75,9 +72,9 @@ public final class SystemHook {
     /** SystemServer.mContext was removed/obfuscated on Android 16; go via ActivityThread. */
     private static Context getSystemContext(ClassLoader cl) {
         try {
-            Object at = XposedHelpers.callStaticMethod(
-                    XposedHelpers.findClass("android.app.ActivityThread", cl), "systemMain");
-            return (Context) XposedHelpers.callMethod(at, "getSystemContext");
+            Class<?> atCls = Reflect.findClass("android.app.ActivityThread", cl);
+            Object at = Reflect.callStatic(atCls, "systemMain", new Class<?>[0]);
+            return (Context) Reflect.call(at, "getSystemContext", new Class<?>[0]);
         } catch (Throwable t) {
             XLog.e("getSystemContext via ActivityThread failed");
             XLog.e(t);
@@ -87,15 +84,14 @@ public final class SystemHook {
 
     private static void hookSystemReady(ClassLoader cl) {
         try {
-            Class<?> ams = XposedHelpers.findClassIfExists(
-                    "com.android.server.am.ActivityManagerService", cl);
+            Class<?> ams = Reflect.findClassOrNull("com.android.server.am.ActivityManagerService", cl);
             if (ams == null) {
                 XLog.e("ActivityManagerService not found");
                 return;
             }
-            XposedBridge.hookAllMethods(ams, "systemReady", new XC_MethodHook() {
+            HookRuntime.hookAllMethods(ams, "systemReady", new HookRuntime.MethodCallback() {
                 @Override
-                protected void afterHookedMethod(MethodHookParam param) {
+                protected void after(HookRuntime.HookParam param) {
                     try {
                         XLog.i("systemReady observed");
                         initialize();
@@ -130,8 +126,7 @@ public final class SystemHook {
             IntentFilter f = new IntentFilter();
             f.addAction(C.ACTION_REQUEST_SCAN);
             f.addAction(C.ACTION_REQUEST_CLEAR);
-            int flags = android.os.Build.VERSION.SDK_INT >= 33
-                    ? android.content.Context.RECEIVER_EXPORTED : 0;
+            int flags = Build.VERSION.SDK_INT >= 33 ? Context.RECEIVER_EXPORTED : 0;
             sysCtx.registerReceiver(new BroadcastReceiver() {
                 @Override
                 public void onReceive(Context context, Intent intent) {
@@ -161,11 +156,11 @@ public final class SystemHook {
             Object userObj = null;
             boolean isUserInfo = false;
             try {
-                userObj = XposedHelpers.callMethod(um, "getUsers", true);
+                userObj = Reflect.call(um, "getUsers", new Class<?>[]{boolean.class}, true);
                 isUserInfo = true;
             } catch (Throwable t1) {
                 try {
-                    userObj = XposedHelpers.callMethod(um, "getUserHandles", true);
+                    userObj = Reflect.call(um, "getUserHandles", new Class<?>[]{boolean.class}, true);
                 } catch (Throwable t2) {
                     XLog.e("user enumeration failed");
                     XLog.e(t1);
@@ -178,13 +173,13 @@ public final class SystemHook {
                     int id;
                     String name = "";
                     if (isUserInfo) {
-                        id = (int) XposedHelpers.getIntField(u, "id");
-                        Object n = XposedHelpers.getObjectField(u, "name");
+                        id = Reflect.getIntField(u, "id");
+                        Object n = Reflect.getField(u, "name");
                         name = n == null ? "" : n.toString();
-                        boolean partial = XposedHelpers.getBooleanField(u, "partial");
+                        boolean partial = Reflect.getBooleanField(u, "partial");
                         if (partial && !packageInstalled(ctx, C.ALIPAY_PKG, id)) continue;
                     } else {
-                        id = (int) XposedHelpers.callMethod(u, "getIdentifier");
+                        id = (int) Reflect.call(u, "getIdentifier", new Class<?>[0]);
                     }
                     boolean alipay = packageInstalled(ctx, C.ALIPAY_PKG, id);
                     JSONObject o = new JSONObject();
@@ -214,15 +209,20 @@ public final class SystemHook {
 
     private static boolean packageInstalled(Context ctx, String pkg, int userId) {
         try {
-            Object globals = XposedHelpers.callStaticMethod(
-                    XposedHelpers.findClass("android.app.AppGlobals",
-                            ctx.getClassLoader()), "getPackageManager");
+            Class<?> appGlobals = Reflect.findClass("android.app.AppGlobals", ctx.getClassLoader());
+            Object globals = Reflect.callStatic(appGlobals, "getPackageManager", new Class<?>[0]);
             try {
-                return XposedHelpers.callMethod(globals, "getPackageInfo", pkg, 0L, userId)
-                        != null;
+                return Reflect.call(
+                        globals,
+                        "getPackageInfo",
+                        new Class<?>[]{String.class, long.class, int.class},
+                        pkg, 0L, userId) != null;
             } catch (Throwable longFlagsError) {
-                return XposedHelpers.callMethod(globals, "getPackageInfo", pkg, 0, userId)
-                        != null;
+                return Reflect.call(
+                        globals,
+                        "getPackageInfo",
+                        new Class<?>[]{String.class, int.class, int.class},
+                        pkg, 0, userId) != null;
             }
         } catch (Throwable t) {
             XLog.e("packageInstalled(" + pkg + ", user " + userId + ") failed");

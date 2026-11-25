@@ -21,5 +21,8 @@ val androidSdkDir = localSdkDir
 
 dependencies {
     // Only the android.* types referenced by stub signatures; never packaged.
-    compileOnly(files(androidSdkDir.map { "$it/platforms/android-36/android.jar" }))
+    compileOnly(files(androidSdkDir.map {
+        val sdk37 = file("$it/platforms/android-37.0/android.jar")
+        if (sdk37.exists()) sdk37 else file("$it/platforms/android-36/android.jar")
+    }))
 }

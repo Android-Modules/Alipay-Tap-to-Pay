@@ -1,6 +1,7 @@
 package com.dalong.alipaynfc.xp;
 
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
@@ -10,13 +11,11 @@ import com.dalong.alipaynfc.C;
 
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import de.robv.android.xposed.XSharedPreferences;
-
 /**
- * Config reader for hooked processes. Channels (first available wins):
- * 1. XSharedPreferences — requires LSPosed "xposedsharedprefs" support (world-readable prefs).
- * 2. ContentProvider call into the module app.
- * Only the NFC worker reads either channel. Dispatch consumes the latest snapshot.
+ * Config reader for hooked processes. Channels:
+ * 1. libxposed API 102 RemotePreferences (native framework sync).
+ * 2. Legacy XSharedPreferences (world-readable prefs on LSPosed 1.9.x).
+ * 3. ContentProvider call into the module app.
  */
 public final class HookConfig {
 
@@ -36,7 +35,7 @@ public final class HookConfig {
 
     private static volatile Cache cached = new Cache();
     private static volatile long nextReloadElapsed;
-    private static XSharedPreferences xsp;
+    private static volatile SharedPreferences remotePrefs;
 
     private HookConfig() {}
 
@@ -58,34 +57,69 @@ public final class HookConfig {
 
     /** Runs on the NFC worker, including after the settings UI broadcasts a change. */
     static void refresh(Context ctx, boolean configChanged) {
-        // The app's in-memory preferences are current even while apply() is writing the file.
-        Cache fresh = configChanged ? loadProvider(ctx) : loadXsp();
-        if (!fresh.valid || (!configChanged && fresh.revision < cached.revision)) {
-            fresh = configChanged ? loadXsp() : loadProvider(ctx);
+        Cache primary = HookRuntime.isModern() ? loadRemotePrefs() : loadLegacyXsp();
+        Cache provider = loadProvider(ctx);
+
+        Cache chosen;
+        if (configChanged) {
+            if (provider.valid && (!primary.valid || provider.revision >= primary.revision)) {
+                chosen = provider;
+            } else {
+                chosen = primary.valid ? primary : provider;
+            }
+        } else {
+            if (primary.valid && (!provider.valid || primary.revision >= provider.revision)) {
+                chosen = primary;
+            } else {
+                chosen = provider.valid ? provider : primary;
+            }
         }
-        if (fresh.valid) cached = fresh;
+        if (chosen.valid && chosen.revision >= cached.revision) {
+            cached = chosen;
+        } else if (chosen.valid && !cached.valid) {
+            cached = chosen;
+        }
         nextReloadElapsed = SystemClock.elapsedRealtime() + RELOAD_INTERVAL_MS;
     }
 
-    private static Cache loadXsp() {
+    private static Cache loadRemotePrefs() {
         Cache c = new Cache();
         try {
-            if (xsp == null) {
-                xsp = new XSharedPreferences(C.MODULE_PKG, C.PREFS);
+            if (remotePrefs == null) {
+                remotePrefs = HookRuntime.getRemotePreferences(C.PREFS);
             }
-            xsp.reload();
-            c.enabled = xsp.getBoolean(C.K_ENABLED, true);
-            c.targetUser = xsp.getInt(C.K_TARGET_USER, 0);
-            c.targetPkg = xsp.getString(C.K_TARGET_PKG, "");
-            c.alipayPkg = xsp.getString(C.K_ALIPAY_PKG, C.ALIPAY_PKG);
-            c.keepHistory = xsp.getBoolean(C.K_KEEP_HISTORY, true);
-            c.revision = xsp.getLong(C.K_REVISION, -1);
-            c.source = "xsp";
-            c.valid = xsp.contains(C.K_ENABLED);
+            if (remotePrefs == null) return c;
+            return readFromPrefs(remotePrefs, "remote");
         } catch (Throwable t) {
-            XLog.e("loadXsp failed");
+            XLog.e("loadRemotePrefs failed");
             XLog.e(t);
         }
+        return c;
+    }
+
+    private static Cache loadLegacyXsp() {
+        Cache c = new Cache();
+        try {
+            SharedPreferences xsp = HookRuntime.getLegacyXSharedPreferences(C.MODULE_PKG, C.PREFS);
+            if (xsp == null) return c;
+            return readFromPrefs(xsp, "xsp");
+        } catch (Throwable t) {
+            XLog.e("loadLegacyXsp failed");
+            XLog.e(t);
+        }
+        return c;
+    }
+
+    private static Cache readFromPrefs(SharedPreferences sp, String source) {
+        Cache c = new Cache();
+        c.enabled = sp.getBoolean(C.K_ENABLED, true);
+        c.targetUser = sp.getInt(C.K_TARGET_USER, 0);
+        c.targetPkg = sp.getString(C.K_TARGET_PKG, "");
+        c.alipayPkg = sp.getString(C.K_ALIPAY_PKG, C.ALIPAY_PKG);
+        c.keepHistory = sp.getBoolean(C.K_KEEP_HISTORY, true);
+        c.revision = sp.getLong(C.K_REVISION, -1);
+        c.source = source;
+        c.valid = sp.contains(C.K_ENABLED);
         return c;
     }
 

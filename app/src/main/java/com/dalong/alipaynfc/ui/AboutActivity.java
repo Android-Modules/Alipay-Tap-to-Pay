@@ -14,12 +14,15 @@ import android.widget.TextView;
 
 import com.dalong.alipaynfc.C;
 import com.dalong.alipaynfc.R;
+import com.dalong.alipaynfc.data.FrameworkState;
 
 /** About Us page featuring author CoolApk, GitHub links, and runtime environment info. */
 public class AboutActivity extends Activity {
 
     private TextView heroSubtitle;
+    private TextView envFrameworkText;
     private TextView envStatusText;
+    private final FrameworkState.Listener fwListener = this::refreshStatus;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -30,9 +33,21 @@ public class AboutActivity extends Activity {
     }
 
     @Override
+    protected void onStart() {
+        super.onStart();
+        FrameworkState.addListener(fwListener);
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
         refreshStatus();
+    }
+
+    @Override
+    protected void onStop() {
+        FrameworkState.removeListener(fwListener);
+        super.onStop();
     }
 
     private void refreshStatus() {
@@ -41,6 +56,9 @@ public class AboutActivity extends Activity {
         String stateLabel = st.allActive ? "框架已启用"
                 : st.anyActive ? "部分作用域已启用" : "框架未启用";
         heroSubtitle.setText("版本 " + ver + " · " + stateLabel);
+        String fw = FrameworkState.getFrameworkSummary();
+        envFrameworkText.setText("Xposed 框架："
+                + (fw != null ? fw : "传统 Xposed API / 未连接框架服务"));
         envStatusText.setText("注入状态：system_server " + (st.sysOk ? "✓" : "○")
                 + " · NFC 服务 " + (st.nfcOk ? "✓" : "○"));
         envStatusText.setTextColor(UiKit.color(this,
@@ -194,6 +212,12 @@ public class AboutActivity extends Activity {
         scopeInfo.setTextColor(UiKit.color(this, R.color.text_secondary));
         scopeInfo.setPadding(0, UiKit.dp(this, 4), 0, 0);
         envCard.addView(scopeInfo);
+
+        envFrameworkText = new TextView(this);
+        envFrameworkText.setTextSize(12.5f);
+        envFrameworkText.setTextColor(UiKit.color(this, R.color.text_secondary));
+        envFrameworkText.setPadding(0, UiKit.dp(this, 4), 0, 0);
+        envCard.addView(envFrameworkText);
 
         envStatusText = new TextView(this);
         envStatusText.setTextSize(12.5f);

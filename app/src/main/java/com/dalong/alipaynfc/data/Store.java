@@ -49,6 +49,7 @@ public final class Store {
                 .putBoolean(C.K_KEEP_HISTORY, c.keepHistory)
                 .putLong(C.K_REVISION, revision)
                 .apply();
+        FrameworkState.syncConfig(c, revision);
     }
 
     public static long revision(Context ctx) {

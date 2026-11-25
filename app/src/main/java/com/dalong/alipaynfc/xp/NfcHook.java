@@ -24,11 +24,7 @@ import org.json.JSONObject;
 
 import java.lang.reflect.InvocationTargetException;
 import java.util.Locale;
-
-import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XposedBridge;
-import de.robv.android.xposed.XposedHelpers;
-import de.robv.android.xposed.callbacks.XC_LoadPackage;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Redirects Alipay tag dispatch inside the system NFC process. */
 public final class NfcHook {
@@ -37,21 +33,26 @@ public final class NfcHook {
     private static final String CHOOSER_ACTIVITY = "com.android.nfc.TechListChooserActivity";
     private static final String FORWARD_STATE = C.MODULE_PKG + ".forwardState";
 
+    private static final AtomicBoolean initialized = new AtomicBoolean(false);
     private static volatile Context appContext;
     private static volatile Handler worker;
 
     private NfcHook() {}
 
-    public static void init(XC_LoadPackage.LoadPackageParam lpp) {
-        XLog.i("loaded in " + lpp.packageName + " sdk=" + Build.VERSION.SDK_INT);
-        if (installDispatchHook(lpp.classLoader)) attachApp();
+    public static void init(String pkg, ClassLoader cl) {
+        if (!initialized.compareAndSet(false, true)) return;
+        XLog.i("loaded in " + pkg + " sdk=" + Build.VERSION.SDK_INT
+                + " modern=" + HookRuntime.isModern());
+        if (installDispatchHook(cl)) {
+            attachApp();
+        }
     }
 
     private static void attachApp() {
         try {
-            XposedBridge.hookAllMethods(Application.class, "attach", new XC_MethodHook() {
+            HookRuntime.hookAllMethods(Application.class, "attach", new HookRuntime.MethodCallback() {
                 @Override
-                protected void afterHookedMethod(MethodHookParam param) {
+                protected void after(HookRuntime.HookParam param) {
                     try {
                         if (param.args.length > 0 && param.args[0] instanceof Context
                                 && appContext == null) {
@@ -111,8 +112,11 @@ public final class NfcHook {
         if (Build.VERSION.SDK_INT >= 37) {
             try {
                 // Both direct NFC dispatch and a confirmed NFC notification reach this call.
-                XposedHelpers.findAndHookMethod(Activity.class, "startActivityAsUser",
-                        Intent.class, Bundle.class, UserHandle.class, forwardHook);
+                HookRuntime.findAndHookMethod(
+                        Activity.class,
+                        "startActivityAsUser",
+                        new Class<?>[]{Intent.class, Bundle.class, UserHandle.class},
+                        forwardHook);
                 XLog.i("dispatch hook installed on NFC activity forwarding");
                 return true;
             } catch (Throwable t) {
@@ -121,8 +125,8 @@ public final class NfcHook {
             }
         }
         try {
-            Class<?> contextImpl = XposedHelpers.findClass("android.app.ContextImpl", cl);
-            if (XposedBridge.hookAllMethods(contextImpl, "startActivityAsUser", legacyHook).isEmpty()) {
+            Class<?> contextImpl = Reflect.findClass("android.app.ContextImpl", cl);
+            if (HookRuntime.hookAllMethods(contextImpl, "startActivityAsUser", legacyHook).isEmpty()) {
                 XLog.e("ContextImpl.startActivityAsUser not found");
                 return false;
             }
@@ -147,9 +151,9 @@ public final class NfcHook {
         }
     }
 
-    private static final XC_MethodHook forwardHook = new XC_MethodHook() {
+    private static final HookRuntime.MethodCallback forwardHook = new HookRuntime.MethodCallback() {
         @Override
-        protected void beforeHookedMethod(MethodHookParam param) {
+        protected void before(HookRuntime.HookParam param) {
             String activity = param.thisObject.getClass().getName();
             boolean chooser = CHOOSER_ACTIVITY.equals(activity);
             if (!chooser && !ROOT_ACTIVITY.equals(activity)) return;
@@ -176,7 +180,7 @@ public final class NfcHook {
         }
 
         @Override
-        protected void afterHookedMethod(MethodHookParam param) {
+        protected void after(HookRuntime.HookParam param) {
             ForwardState state = (ForwardState) param.getObjectExtra(FORWARD_STATE);
             if (state == null) return;
             String target = targetLabel(state.config);
@@ -186,8 +190,7 @@ public final class NfcHook {
                 param.args[0] = state.originalIntent;
                 param.args[2] = state.originalUser;
                 try {
-                    param.setResult(XposedBridge.invokeOriginalMethod(
-                            param.method, param.thisObject, param.args));
+                    param.setResult(param.invokeOriginal());
                 } catch (InvocationTargetException e) {
                     param.setThrowable(e.getCause());
                 } catch (Throwable t) {
@@ -201,9 +204,9 @@ public final class NfcHook {
         }
     };
 
-    private static final XC_MethodHook legacyHook = new XC_MethodHook() {
+    private static final HookRuntime.MethodCallback legacyHook = new HookRuntime.MethodCallback() {
         @Override
-        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+        protected void before(HookRuntime.HookParam param) {
             try {
                 Object[] args = param.args;
                 if (args == null) return;
@@ -309,21 +312,19 @@ public final class NfcHook {
     }
 
     /** HyperOS 3 and earlier use the dispatcher context directly. */
-    private static void redirectLegacy(XC_MethodHook.MethodHookParam param, Intent outer, Intent inner,
+    private static void redirectLegacy(HookRuntime.HookParam param, Intent outer, Intent inner,
             Cache cfg, int userIdx) {
         try {
             Intent ni = redirectIntent(inner, cfg);
             boolean redirectUser = cfg.targetUser != 0;
             UserHandle uh = userHandleOf(cfg.targetUser);
             try {
-                // Same ContextImpl the dispatcher uses; NFC dispatch holds an app-switch
-                // window, and nfc uid has INTERACT_ACROSS_USERS for clone users.
-                XposedHelpers.callMethod(param.thisObject, "startActivityAsUser",
+                Reflect.call(param.thisObject, "startActivityAsUser",
+                        new Class<?>[]{Intent.class, Bundle.class, UserHandle.class},
                         ni, null, uh);
                 param.setResult(null);
                 outer.putExtra(C.EXTRA_HANDLED, true);
             } catch (Throwable directError) {
-                // Fallback: the stock NfcRootActivity extra mechanism.
                 outer.putExtra("launchIntent", ni);
                 if (redirectUser) {
                     outer.putExtra("launchIntentUserHandle", uh);
@@ -342,13 +343,10 @@ public final class NfcHook {
     /** UserHandle.of(int) is hidden; fall back to the public constructor. */
     static UserHandle userHandleOf(int userId) {
         try {
-            return (UserHandle) XposedHelpers.callStaticMethod(UserHandle.class, "of", userId);
+            return (UserHandle) Reflect.callStatic(
+                    UserHandle.class, "of", new Class<?>[]{int.class}, userId);
         } catch (Throwable t) {
-            try {
-                return UserHandle.class.getConstructor(int.class).newInstance(userId);
-            } catch (Throwable t2) {
-                throw new RuntimeException(t2);
-            }
+            return Reflect.newInstance(UserHandle.class, new Class<?>[]{int.class}, userId);
         }
     }
 
