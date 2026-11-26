@@ -42,16 +42,14 @@ public final class UiKit {
     private UiKit() {}
 
     public static final class AliveStatus {
-        public final boolean sysOk;
         public final boolean nfcOk;
+        public final boolean scanOk;
         public final boolean allActive;
-        public final boolean anyActive;
 
-        AliveStatus(boolean sysOk, boolean nfcOk) {
-            this.sysOk = sysOk;
+        AliveStatus(boolean nfcOk, boolean scanOk) {
             this.nfcOk = nfcOk;
-            this.allActive = sysOk && nfcOk;
-            this.anyActive = sysOk || nfcOk;
+            this.scanOk = scanOk;
+            this.allActive = nfcOk;
         }
     }
 
@@ -61,9 +59,10 @@ public final class UiKit {
             JSONObject alive = new JSONObject(raw == null || raw.isEmpty() ? "{}" : raw);
             int boot = Settings.Global.getInt(ctx.getContentResolver(), Settings.Global.BOOT_COUNT, -1);
             long bootTime = System.currentTimeMillis() - SystemClock.elapsedRealtime();
-            boolean sysOk = isAliveThisBoot(alive, "android", boot, bootTime);
             boolean nfcOk = isAliveThisBoot(alive, C.NFC_PKG, boot, bootTime);
-            return new AliveStatus(sysOk, nfcOk);
+            String users = Store.getUsers(ctx);
+            boolean scanOk = users != null && !users.isEmpty();
+            return new AliveStatus(nfcOk, scanOk);
         } catch (Exception e) {
             return new AliveStatus(false, false);
         }
@@ -286,7 +285,7 @@ public final class UiKit {
             }
         } catch (Exception ignored) {
         }
-        return "1.0.8";
+        return "1.0.9";
     }
 
     public static void openBrowser(Context ctx, String url) {

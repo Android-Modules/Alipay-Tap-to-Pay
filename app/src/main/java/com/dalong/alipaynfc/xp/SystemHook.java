@@ -7,20 +7,14 @@ import android.content.IntentFilter;
 import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
-import android.os.UserManager;
 
 import com.dalong.alipaynfc.C;
-
-import org.json.JSONArray;
-import org.json.JSONObject;
 
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Loaded inside system_server.
- * Enumerates Android users that have Alipay installed (system app-cloning runs the same
- * package under a hidden user id, usually 999) and reports the list to the module app.
- * Also handles scan and history-clear requests.
+ * Optional legacy fallback inside system_server (if the user also scoped system/android).
+ * Primary scanning and record management now run directly inside com.android.nfc.
  */
 public final class SystemHook {
 
@@ -49,13 +43,11 @@ public final class SystemHook {
                             } catch (Throwable ignored) {
                             }
                         }
-                        XLog.i("system context acquired: " + (sysCtx != null));
                         if (sysCtx == null) return;
                         HandlerThread ht = new HandlerThread("AlipayNfcSwitch");
                         ht.start();
                         handler = new Handler(ht.getLooper());
                         hookSystemReady(cl);
-                        // Fallback trigger: AMS.systemReady may not be hookable on all ROMs.
                         handler.postDelayed(SystemHook::initialize, 8000);
                     } catch (Throwable t) {
                         XLog.e("SystemHook.startOtherServices after failed");
@@ -69,12 +61,18 @@ public final class SystemHook {
         }
     }
 
-    /** SystemServer.mContext was removed/obfuscated on Android 16; go via ActivityThread. */
     private static Context getSystemContext(ClassLoader cl) {
         try {
             Class<?> atCls = Reflect.findClass("android.app.ActivityThread", cl);
-            Object at = Reflect.callStatic(atCls, "systemMain", new Class<?>[0]);
-            return (Context) Reflect.call(at, "getSystemContext", new Class<?>[0]);
+            Object at = null;
+            try {
+                at = Reflect.callStatic(atCls, "currentActivityThread", new Class<?>[0]);
+            } catch (Throwable ignored) {
+            }
+            if (at == null) {
+                at = Reflect.callStatic(atCls, "systemMain", new Class<?>[0]);
+            }
+            return at == null ? null : (Context) Reflect.call(at, "getSystemContext", new Class<?>[0]);
         } catch (Throwable t) {
             XLog.e("getSystemContext via ActivityThread failed");
             XLog.e(t);
@@ -85,19 +83,11 @@ public final class SystemHook {
     private static void hookSystemReady(ClassLoader cl) {
         try {
             Class<?> ams = Reflect.findClassOrNull("com.android.server.am.ActivityManagerService", cl);
-            if (ams == null) {
-                XLog.e("ActivityManagerService not found");
-                return;
-            }
+            if (ams == null) return;
             HookRuntime.hookAllMethods(ams, "systemReady", new HookRuntime.MethodCallback() {
                 @Override
                 protected void after(HookRuntime.HookParam param) {
-                    try {
-                        XLog.i("systemReady observed");
-                        initialize();
-                    } catch (Throwable t) {
-                        XLog.e(t);
-                    }
+                    initialize();
                 }
             });
         } catch (Throwable t) {
@@ -111,12 +101,10 @@ public final class SystemHook {
         try {
             initialized = true;
             registerReceiver();
-            handler.postDelayed(SystemHook::scanAndBroadcast, 1500);
+            handler.postDelayed(() -> UserScanner.scanAndBroadcast(sysCtx, "system"), 1500);
             NfcHook.sendAlive(sysCtx, "android");
-            XLog.i("initialized");
         } catch (Throwable t) {
             initialized = false;
-            XLog.e("initialize failed");
             XLog.e(t);
         }
     }
@@ -132,102 +120,14 @@ public final class SystemHook {
                 public void onReceive(Context context, Intent intent) {
                     String action = intent.getAction();
                     if (C.ACTION_REQUEST_SCAN.equals(action) && handler != null) {
-                        handler.post(SystemHook::scanAndBroadcast);
+                        handler.post(() -> UserScanner.scanAndBroadcast(sysCtx, "system"));
                     } else if (C.ACTION_REQUEST_CLEAR.equals(action) && handler != null) {
                         handler.post(() -> GStore.clearRecords(sysCtx));
                     }
                 }
             }, f, flags);
-            XLog.i("request-scan receiver registered");
         } catch (Throwable t) {
-            XLog.e("registerReceiver failed");
             XLog.e(t);
-        }
-    }
-
-    private static void scanAndBroadcast() {
-        try {
-            Context ctx = sysCtx;
-            if (ctx == null) return;
-            long start = System.currentTimeMillis();
-            UserManager um = ctx.getSystemService(UserManager.class);
-            JSONArray users = new JSONArray();
-
-            Object userObj = null;
-            boolean isUserInfo = false;
-            try {
-                userObj = Reflect.call(um, "getUsers", new Class<?>[]{boolean.class}, true);
-                isUserInfo = true;
-            } catch (Throwable t1) {
-                try {
-                    userObj = Reflect.call(um, "getUserHandles", new Class<?>[]{boolean.class}, true);
-                } catch (Throwable t2) {
-                    XLog.e("user enumeration failed");
-                    XLog.e(t1);
-                    XLog.e(t2);
-                }
-            }
-            if (userObj instanceof Iterable) {
-                for (Object u : (Iterable<?>) userObj) {
-                    if (u == null) continue;
-                    int id;
-                    String name = "";
-                    if (isUserInfo) {
-                        id = Reflect.getIntField(u, "id");
-                        Object n = Reflect.getField(u, "name");
-                        name = n == null ? "" : n.toString();
-                        boolean partial = Reflect.getBooleanField(u, "partial");
-                        if (partial && !packageInstalled(ctx, C.ALIPAY_PKG, id)) continue;
-                    } else {
-                        id = (int) Reflect.call(u, "getIdentifier", new Class<?>[0]);
-                    }
-                    boolean alipay = packageInstalled(ctx, C.ALIPAY_PKG, id);
-                    JSONObject o = new JSONObject();
-                    o.put("id", id);
-                    o.put("name", name);
-                    o.put("alipay", alipay);
-                    users.put(o);
-                }
-            }
-
-            JSONObject result = new JSONObject();
-            result.put("users", users);
-            result.put("ts", System.currentTimeMillis());
-            result.put("elapsed", System.currentTimeMillis() - start);
-
-            GStore.putUsers(ctx, result.toString());
-            Intent bi = new Intent(C.ACTION_SCAN_RESULT);
-            bi.setPackage(C.MODULE_PKG);
-            bi.putExtra(C.EXTRA_JSON, result.toString());
-            ctx.sendBroadcast(bi);
-            XLog.i("scan done: " + result);
-        } catch (Throwable t) {
-            XLog.e("scanAndBroadcast failed");
-            XLog.e(t);
-        }
-    }
-
-    private static boolean packageInstalled(Context ctx, String pkg, int userId) {
-        try {
-            Class<?> appGlobals = Reflect.findClass("android.app.AppGlobals", ctx.getClassLoader());
-            Object globals = Reflect.callStatic(appGlobals, "getPackageManager", new Class<?>[0]);
-            try {
-                return Reflect.call(
-                        globals,
-                        "getPackageInfo",
-                        new Class<?>[]{String.class, long.class, int.class},
-                        pkg, 0L, userId) != null;
-            } catch (Throwable longFlagsError) {
-                return Reflect.call(
-                        globals,
-                        "getPackageInfo",
-                        new Class<?>[]{String.class, int.class, int.class},
-                        pkg, 0, userId) != null;
-            }
-        } catch (Throwable t) {
-            XLog.e("packageInstalled(" + pkg + ", user " + userId + ") failed");
-            XLog.e(t);
-            return false;
         }
     }
 }

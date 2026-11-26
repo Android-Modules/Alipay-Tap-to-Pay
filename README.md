@@ -19,8 +19,8 @@
 
 1. 从 [GitHub Releases](https://github.com/Android-Modules/Alipay-Tap-to-Pay/releases) 下载并安装 APK。
 2. 打开 LSPosed 管理器，在「模块」中启用「碰一碰切换」。
-3. 在作用域中勾选 **Android 系统**（`android`）和 **NFC**（`com.android.nfc`）。
-4. 重启手机、解锁并开启 NFC。打开「碰一碰切换」，确认顶部的 `system_server` 和「NFC 服务」都打勾。升级模块后也需要重启，以便系统进程加载新版本。
+3. 在作用域中勾选 **NFC**（`com.android.nfc`）。
+4. 开启手机 NFC（或强行停止/重启 NFC 服务，也可重启手机）。打开「碰一碰切换」，确认顶部显示「模块已激活」（`NFC 服务 ✓`、`实例扫描 ✓`）。
 
 ## 选择碰一碰目标
 
@@ -73,7 +73,7 @@ HyperOS 4 上的 `dispatch hook installed on NFC activity forwarding` 表示转�
 ## 实现与构建
 
 - `NfcHook` 处理支付宝的标签派发。HyperOS 3 路径在 NFC 服务调用 `ContextImpl.startActivityAsUser` 时重定向。HyperOS 4 路径在 NFC 界面向目标应用转发时调整用户或包名，沿用系统的通知确认流程。
-- `SystemHook` 在 `system_server` 中扫描安装了支付宝的用户。界面读取本次开机的注入状态、扫描结果和派发记录。配置刷新和记录写入在后台处理。
+- `UserScanner` 在 `com.android.nfc` 中直接枚举各 Android 用户内已安装的支付宝实例（无需注入 `system_server`）。界面读取本次开机的注入状态、扫描结果和派发记录；配置同步优先使用 API 102 `RemotePreferences`。
 - `app` 包含模块与界面，`xposed-stub` 提供旧版 Xposed 编译期 API 声明，同时支持现代 libxposed API 102（LSPosed 2.1/2.2+，带 API 调用保护）与传统 LSPosed 1.9.x 双入口。
 
 使用 JDK 17 和 Android SDK Platform 37.0 构建。默认的本地 release 构建使用当前机器的 Android debug 签名。

@@ -33,6 +33,7 @@ import android.widget.TextView;
 
 import com.dalong.alipaynfc.C;
 import com.dalong.alipaynfc.R;
+import com.dalong.alipaynfc.data.FrameworkState;
 import com.dalong.alipaynfc.data.Store;
 
 import org.json.JSONArray;
@@ -92,6 +93,7 @@ public class MainActivity extends Activity {
 
     private BroadcastReceiver receiver;
     private ContentObserver contentObserver;
+    private final FrameworkState.Listener fwListener = this::renderStatus;
     private final SimpleDateFormat timeFmt = new SimpleDateFormat("MM-dd HH:mm:ss", Locale.CHINA);
 
     private final List<UserChoice> userChoices = new ArrayList<>();
@@ -150,10 +152,22 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    protected void onStart() {
+        super.onStart();
+        FrameworkState.addListener(fwListener);
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
         refreshAll();
         requestScan();
+    }
+
+    @Override
+    protected void onStop() {
+        FrameworkState.removeListener(fwListener);
+        super.onStop();
     }
 
     @Override
@@ -234,28 +248,30 @@ public class MainActivity extends Activity {
             statusHeadline.setText("模块已激活");
             statusHeadline.setTextColor(UiKit.color(this, R.color.status_ok));
             statusHint.setText("配置即时生效，触碰商家「碰一下」设备即可按所选实例响应。");
-        } else if (st.sysOk) {
-            statusHeadline.setText("部分作用域已激活");
+        } else if (FrameworkState.isBound() && FrameworkState.hasNfcScope()) {
+            statusHeadline.setText("等待 NFC 服务加载");
             statusHeadline.setTextColor(UiKit.color(this, R.color.status_warn));
-            statusHint.setText("system_server 已就绪，请解锁手机并开启 NFC 后再试。");
-        } else if (st.nfcOk) {
-            statusHeadline.setText("部分作用域已激活");
-            statusHeadline.setTextColor(UiKit.color(this, R.color.status_warn));
-            statusHint.setText("NFC 服务已就绪，请重启手机以加载 system_server 注入。");
+            statusHint.setText("LSPosed 作用域已就绪，请开启手机 NFC（或开关一次 NFC / 重启手机）以生效。");
         } else {
             statusHeadline.setText("未检测到模块注入");
             statusHeadline.setTextColor(UiKit.color(this, R.color.status_warn));
-            statusHint.setText("请在 LSPosed 中启用本模块，勾选「Android 系统」和「NFC」并重启。");
+            statusHint.setText("请在 LSPosed 中启用本模块并勾选「NFC」(com.android.nfc)，再开关一次 NFC 或重启手机。");
         }
 
         statusChipRow.removeAllViews();
-        TextView sysChip = UiKit.statusChip(this, "system_server", st.sysOk);
-        TextView nfcChip = UiKit.statusChip(this, "NFC 服务", st.nfcOk);
         LinearLayout.LayoutParams chipLp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         chipLp.setMarginEnd(UiKit.dp(this, 8));
-        statusChipRow.addView(sysChip, chipLp);
-        statusChipRow.addView(nfcChip);
+        statusChipRow.addView(UiKit.statusChip(this, "NFC 服务", st.nfcOk), chipLp);
+        if (FrameworkState.isBound()) {
+            LinearLayout.LayoutParams chipLp2 = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            chipLp2.setMarginEnd(UiKit.dp(this, 8));
+            statusChipRow.addView(UiKit.statusChip(this, "实例扫描", st.scanOk), chipLp2);
+            statusChipRow.addView(UiKit.statusChip(this, "API 102", true));
+        } else {
+            statusChipRow.addView(UiKit.statusChip(this, "实例扫描", st.scanOk));
+        }
 
         if (!initialExpansionApplied) {
             initialExpansionApplied = true;
@@ -843,7 +859,7 @@ public class MainActivity extends Activity {
 
         helpBody = new TextView(this);
         helpBody.setText(
-                "1. 在 LSPosed 管理器中启用本模块，作用域勾选「Android 系统」和「NFC」，然后重启手机。\n"
+                "1. 在 LSPosed 管理器中启用本模块，作用域勾选「NFC」(com.android.nfc)，开关一次 NFC 或重启手机。\n"
                         + "2. 开启手机 NFC 并解锁屏幕，触碰商家「碰一下」设备即可验证。\n"
                         + "3. 切换目标后即时生效；派发记录可确认每次触发的实际去向。\n"
                         + "4. 若切到分身后无反应，请确认分身支付宝已登录并已开通碰一碰功能。");

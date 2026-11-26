@@ -32,7 +32,7 @@ public class Api102Entry extends XposedModule {
         if (pkg == null) return;
         if (C.NFC_PKG.equals(pkg)) {
             NfcHook.init(pkg, param.getClassLoader());
-        } else if ("android".equals(pkg)) {
+        } else if ("system".equals(pkg) || "android".equals(pkg)) {
             SystemHook.init(param.getClassLoader());
         }
     }

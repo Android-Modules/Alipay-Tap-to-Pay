@@ -7,6 +7,7 @@ import android.os.Looper;
 
 import com.dalong.alipaynfc.C;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
@@ -53,6 +54,16 @@ public final class FrameworkState {
                             Set<String> clean = new HashSet<>();
                             for (String item : scope) {
                                 if (item != null) clean.add(item);
+                            }
+                            List<String> stale = new ArrayList<>();
+                            if (clean.contains("android")) stale.add("android");
+                            if (clean.contains("system")) stale.add("system");
+                            if (!stale.isEmpty()) {
+                                try {
+                                    service.removeScope(stale);
+                                    clean.removeAll(stale);
+                                } catch (Throwable ignored) {
+                                }
                             }
                             boundScope = Collections.unmodifiableSet(clean);
                         }
@@ -117,6 +128,16 @@ public final class FrameworkState {
 
     public static Set<String> getScope() {
         return boundScope;
+    }
+
+    public static boolean hasSystemScope() {
+        Set<String> s = boundScope;
+        return s != null && (s.contains("system") || s.contains("android"));
+    }
+
+    public static boolean hasNfcScope() {
+        Set<String> s = boundScope;
+        return s != null && s.contains(C.NFC_PKG);
     }
 
     public static void addListener(Listener listener) {

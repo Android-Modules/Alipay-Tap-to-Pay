@@ -53,14 +53,13 @@ public class AboutActivity extends Activity {
     private void refreshStatus() {
         UiKit.AliveStatus st = UiKit.readAliveStatus(this);
         String ver = UiKit.getAppVersionName(this);
-        String stateLabel = st.allActive ? "框架已启用"
-                : st.anyActive ? "部分作用域已启用" : "框架未启用";
+        String stateLabel = st.allActive ? "框架已启用" : "等待 NFC 注入";
         heroSubtitle.setText("版本 " + ver + " · " + stateLabel);
         String fw = FrameworkState.getFrameworkSummary();
         envFrameworkText.setText("Xposed 框架："
                 + (fw != null ? fw : "传统 Xposed API / 未连接框架服务"));
-        envStatusText.setText("注入状态：system_server " + (st.sysOk ? "✓" : "○")
-                + " · NFC 服务 " + (st.nfcOk ? "✓" : "○"));
+        envStatusText.setText("运行状态：NFC 服务 " + (st.nfcOk ? "✓" : "○")
+                + " · 实例扫描 " + (st.scanOk ? "✓" : "○"));
         envStatusText.setTextColor(UiKit.color(this,
                 st.allActive ? R.color.status_ok : R.color.text_secondary));
     }
@@ -207,7 +206,7 @@ public class AboutActivity extends Activity {
         envCard.addView(sysInfo);
 
         TextView scopeInfo = new TextView(this);
-        scopeInfo.setText("LSPosed 作用域：Android 系统 (android) · NFC (com.android.nfc)");
+        scopeInfo.setText("LSPosed 作用域：NFC (com.android.nfc)");
         scopeInfo.setTextSize(12.5f);
         scopeInfo.setTextColor(UiKit.color(this, R.color.text_secondary));
         scopeInfo.setPadding(0, UiKit.dp(this, 4), 0, 0);

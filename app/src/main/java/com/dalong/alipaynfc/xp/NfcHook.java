@@ -66,6 +66,7 @@ public final class NfcHook {
                             handler.post(() -> {
                                 HookConfig.refresh(ctx, false);
                                 sendAlive(ctx, C.NFC_PKG);
+                                UserScanner.scanAndBroadcast(ctx, "nfc");
                             });
                             worker = handler;
                         }
@@ -85,6 +86,7 @@ public final class NfcHook {
         try {
             IntentFilter f = new IntentFilter();
             f.addAction(C.ACTION_CONFIG_CHANGED);
+            f.addAction(C.ACTION_REQUEST_SCAN);
             f.addAction(C.ACTION_REQUEST_CLEAR);
             f.addAction(Intent.ACTION_USER_UNLOCKED);
             BroadcastReceiver r = new BroadcastReceiver() {
@@ -93,6 +95,12 @@ public final class NfcHook {
                     String action = intent.getAction();
                     if (C.ACTION_CONFIG_CHANGED.equals(action) || Intent.ACTION_USER_UNLOCKED.equals(action)) {
                         HookConfig.refresh(ctx, C.ACTION_CONFIG_CHANGED.equals(action));
+                        if (Intent.ACTION_USER_UNLOCKED.equals(action)) {
+                            UserScanner.scanAndBroadcast(ctx, "nfc");
+                        }
+                    } else if (C.ACTION_REQUEST_SCAN.equals(action)) {
+                        sendAlive(ctx, C.NFC_PKG);
+                        UserScanner.scanAndBroadcast(ctx, "nfc");
                     } else if (C.ACTION_REQUEST_CLEAR.equals(action)) {
                         GStore.clearRecords(context);
                         XLog.i("records cleared via nfc process");
